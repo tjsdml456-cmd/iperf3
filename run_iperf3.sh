@@ -1,4 +1,3 @@
-  GNU nano 7.2                                                               run_iperf3.sh
 #!/bin/bash
 set -e
 
