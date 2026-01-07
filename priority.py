@@ -63,6 +63,13 @@ def parse_priority_log(log_file: str) -> Dict[int, List[Dict]]:
         print(f"Error: 파일 읽기 중 오류 발생: {e}")
         sys.exit(1)
     
+    # 각 UE별로 타임스탬프 기준으로 정렬 (None 값은 마지막에)
+    for ue_idx in ue_data.keys():
+        ue_data[ue_idx] = sorted(
+            ue_data[ue_idx], 
+            key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max
+        )
+    
     return ue_data
 
 def print_summary(ue_data: Dict[int, List[Dict]]):
@@ -101,44 +108,81 @@ def print_summary(ue_data: Dict[int, List[Dict]]):
         print(f"    - 최대값: {max(pf_weights):.6f}")
         print(f"    - 평균값: {sum(pf_weights) / len(pf_weights):.6f}")
 
-def print_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None):
-    """특정 UE의 상세 정보를 시간 순서대로 전체 출력합니다."""
+def get_global_first_timestamp(ue_data: Dict[int, List[Dict]]) -> datetime:
+    """모든 UE의 레코드 중 가장 이른 타임스탬프를 찾습니다."""
+    global_first = None
+    for ue_idx, entries in ue_data.items():
+        for entry in entries:
+            if entry['timestamp'] is not None:
+                if global_first is None or entry['timestamp'] < global_first:
+                    global_first = entry['timestamp']
+    return global_first
+
+def print_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None, use_global_time: bool = True):
+    """특정 UE의 상세 정보를 시간 순서대로 전체 출력합니다.
+    
+    Args:
+        ue_data: UE별 데이터
+        ue_idx: 특정 UE만 출력 (None이면 모두)
+        use_global_time: True면 모든 UE의 가장 이른 시간을 기준으로 사용 (기본값: True)
+    """
     if ue_idx is not None:
         ues_to_print = [ue_idx] if ue_idx in ue_data else []
     else:
         ues_to_print = sorted(ue_data.keys())
+    
+    # 공통 기준 시간 계산 (기본값으로 활성화)
+    global_first_timestamp = None
+    if use_global_time:
+        global_first_timestamp = get_global_first_timestamp(ue_data)
+        if global_first_timestamp:
+            print(f"\n{'=' * 80}")
+            print(f"[공통 기준 시간] {global_first_timestamp.isoformat()}")
+            print(f"모든 UE의 시간은 이 기준 시간으로부터의 경과 시간(초)입니다.")
+            print(f"{'=' * 80}")
     
     for ue in ues_to_print:
         entries = ue_data[ue]
         if not entries:
             continue
         
+        # 이미 parse_priority_log에서 정렬되었지만, 다시 확인
         # timestamp 기준으로 정렬 (None 값은 마지막에 배치)
         entries_sorted = sorted(entries, key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max)
         
-        # 첫 번째 레코드의 시간을 기준으로 경과 시간(초) 계산
-        first_timestamp = None
-        for entry in entries_sorted:
-            if entry['timestamp'] is not None:
-                first_timestamp = entry['timestamp']
-                break
+        # 기준 시간 선택: 공통 시간 사용 옵션이 켜져 있으면 그것을, 아니면 UE별 첫 시간 사용
+        if use_global_time and global_first_timestamp is not None:
+            first_timestamp = global_first_timestamp
+            time_label = "공통 기준 시간"
+        else:
+            # 정렬된 리스트의 첫 번째 유효한 타임스탬프를 기준으로 사용
+            first_timestamp = None
+            for entry in entries_sorted:
+                if entry['timestamp'] is not None:
+                    first_timestamp = entry['timestamp']
+                    break
+            time_label = "UE별 기준 시간"
         
         if first_timestamp is None:
+            print(f"\n[경고] UE{ue}: 유효한 타임스탬프가 없습니다.")
             first_timestamp = datetime.now()  # fallback
-            
+        
         print(f"\n{'=' * 80}")
         print(f"UE{ue} 상세 정보 (전체 {len(entries_sorted)}개, 시간 순서대로 정렬)")
+        print(f"{time_label}: {first_timestamp.isoformat()}")
         print(f"{'=' * 80}")
-        print(f"{'시간(초)':<12} {'min_combined_prio':<18} {'prio_weight':<12} {'pf_weight':<12} {'gbr_weight':<12} {'delay_weight':<12}")
+        print(f"{'시간(분:초)':<15} {'min_combined_prio':<18} {'prio_weight':<12} {'pf_weight':<12} {'gbr_weight':<12} {'delay_weight':<12}")
         print("-" * 80)
         
-        for entry in entries_sorted:  # 시간 순서대로 출력
+        for entry in entries_sorted:
             if entry['timestamp'] is not None:
-                elapsed_seconds = (entry['timestamp'] - first_timestamp).total_seconds()
-                time_str = f"{elapsed_seconds:.1f}"
+                # 분:초.XX 형식으로 표시 (시간 제외, 소수점 둘째 자리)
+                minutes = entry['timestamp'].minute
+                seconds = entry['timestamp'].second + entry['timestamp'].microsecond / 1000000.0
+                abs_time_str = f"{minutes:02d}:{seconds:05.2f}"
             else:
-                time_str = "N/A"
-            print(f"{time_str:<12} {entry['min_combined_prio']:<18} "
+                abs_time_str = "N/A"
+            print(f"{abs_time_str:<15} {entry['min_combined_prio']:<18} "
                   f"{entry['prio_weight']:<12.3f} {entry['pf_weight']:<12.6f} "
                   f"{entry['gbr_weight']:<12.3f} {entry['delay_weight']:<12.3f}")
 
@@ -153,10 +197,10 @@ def export_to_csv(ue_data: Dict[int, List[Dict]], output_file: str):
         
         for ue_idx in sorted(ue_data.keys()):
             entries = ue_data[ue_idx]
-            # timestamp 기준으로 정렬
+            # 이미 정렬되어 있지만 다시 확인
             entries_sorted = sorted(entries, key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max)
             
-            # 첫 번째 레코드의 시간을 기준으로 경과 시간(초) 계산
+            # 정렬된 리스트의 첫 번째 유효한 타임스탬프를 기준으로 사용
             first_timestamp = None
             for entry in entries_sorted:
                 if entry['timestamp'] is not None:
@@ -195,6 +239,7 @@ def main():
         print("\nOptions:")
         print("  -u <ue_idx>    특정 UE만 출력 (예: -u 0)")
         print("  -c <csv_file>  CSV 파일로 저장")
+        print("  -g, --global   모든 UE를 공통 기준 시간으로 정렬")
         print("  -h, --help     도움말 출력")
         sys.exit(0)
     
@@ -208,6 +253,7 @@ def main():
     
     ue_idx = None
     csv_file = None
+    use_global_time = False
     
     # 옵션 파싱
     i = opt_start
@@ -218,6 +264,9 @@ def main():
         elif sys.argv[i] == '-c' and i + 1 < len(sys.argv):
             csv_file = sys.argv[i + 1]
             i += 2
+        elif sys.argv[i] in ['-g', '--global']:
+            use_global_time = True
+            i += 1
         else:
             print(f"Warning: 알 수 없는 옵션 '{sys.argv[i]}' (무시됨)")
             i += 1
@@ -231,7 +280,7 @@ def main():
         sys.exit(1)
     
     # 전체 상세 정보 출력
-    print_detailed(ue_data, ue_idx)
+    print_detailed(ue_data, ue_idx, use_global_time)
     
     # CSV 저장
     if csv_file:
