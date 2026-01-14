@@ -1,3 +1,4 @@
+  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              run_iperf3.sh
 #!/bin/bash
 # set -e 제거 (에러가 발생해도 계속 진행)
 
@@ -61,9 +62,9 @@ echo "=========================================="
 echo "[$(timestamp)] === UE1만 DSCP 동적 변경 테스트 ==="
 echo "  Phase 1: 0-10초 - 모든 UE DSCP=0"
 echo "  대기: 10초 (트래픽 중단)"
-echo "  Phase 2: 20-40초 - UE1만 DSCP=32 (0x80)"
+echo "  Phase 2: 20-40초 - UE1만 DSCP=32 (0x80), UE2/UE3는 DSCP=0"
 echo "  대기: 20초 (트래픽 중단)"
-echo "  Phase 3: 60-80초 - UE1만 DSCP=14 (0x38)"
+echo "  Phase 3: 60-80초 - UE1만 DSCP=14 (0x38), UE2/UE3는 DSCP=0"
 echo "=========================================="
 
 # Phase 1: 모든 UE DSCP=0 (10초)
@@ -111,9 +112,9 @@ done
 printf "\n"
 echo ""
 
-# Phase 2: UE1만 DSCP=32 (20초)
-echo "[$(timestamp)] Phase 2: UE1만 트래픽 시작 (DSCP=32/0x80, 20초)..."
-# UE1 DL 트래픽
+# Phase 2: UE1만 DSCP=32, UE2/UE3는 DSCP=0 (20초)
+echo "[$(timestamp)] Phase 2: UE1만 DSCP=32, UE2/UE3는 DSCP=0으로 트래픽 시작 (20초)..."
+# UE1 DL 트래픽 (DSCP=32)
 iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -S 0x80 > /tmp/iperf3_dl1.log 2>&1 &
 DL1_PID=$!
 sleep 1
@@ -124,7 +125,29 @@ else
     cat /tmp/iperf3_dl1.log | tail -10
 fi
 
-# UE1 UL 트래픽
+# UE2 DL 트래픽 (DSCP=0)
+iperf3 -c 10.45.0.3 -t 20 -p 6501 -i 1 -S 0x00 > /tmp/iperf3_dl2.log 2>&1 &
+DL2_PID=$!
+sleep 1
+if kill -0 $DL2_PID 2>/dev/null; then
+    echo "  ✓ UE2 DL 트래픽 시작됨 (PID: $DL2_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE2 DL 트래픽 시작 실패!"
+    cat /tmp/iperf3_dl2.log | tail -10
+fi
+
+# UE3 DL 트래픽 (DSCP=0)
+iperf3 -c 10.45.0.4 -t 20 -p 6502 -i 1 -S 0x00 > /tmp/iperf3_dl3.log 2>&1 &
+DL3_PID=$!
+sleep 1
+if kill -0 $DL3_PID 2>/dev/null; then
+    echo "  ✓ UE3 DL 트래픽 시작됨 (PID: $DL3_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE3 DL 트래픽 시작 실패!"
+    cat /tmp/iperf3_dl3.log | tail -10
+fi
+
+# UE1 UL 트래픽 (DSCP=32)
 sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 -S 0x80 > /tmp/iperf3_ul1.log 2>&1 &
 UL1_PID=$!
 sleep 1
@@ -133,6 +156,28 @@ if kill -0 $UL1_PID 2>/dev/null; then
 else
     echo "  ✗ UE1 UL 트래픽 시작 실패!"
     cat /tmp/iperf3_ul1.log | tail -10
+fi
+
+# UE2 UL 트래픽 (DSCP=0)
+sudo ip netns exec ue2 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6601 -i 1 -S 0x00 > /tmp/iperf3_ul2.log 2>&1 &
+UL2_PID=$!
+sleep 1
+if kill -0 $UL2_PID 2>/dev/null; then
+    echo "  ✓ UE2 UL 트래픽 시작됨 (PID: $UL2_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE2 UL 트래픽 시작 실패!"
+    cat /tmp/iperf3_ul2.log | tail -10
+fi
+
+# UE3 UL 트래픽 (DSCP=0)
+sudo ip netns exec ue3 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6602 -i 1 -S 0x00 > /tmp/iperf3_ul3.log 2>&1 &
+UL3_PID=$!
+sleep 1
+if kill -0 $UL3_PID 2>/dev/null; then
+    echo "  ✓ UE3 UL 트래픽 시작됨 (PID: $UL3_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE3 UL 트래픽 시작 실패!"
+    cat /tmp/iperf3_ul3.log | tail -10
 fi
 echo ""
 
@@ -144,12 +189,12 @@ done
 printf "\n"
 
 # 프로세스 종료
-echo "[$(timestamp)] Phase 2 완료 - UE1 트래픽 중단 중..."
-kill $DL1_PID $UL1_PID 2>/dev/null || true
+echo "[$(timestamp)] Phase 2 완료 - 모든 트래픽 중단 중..."
+kill $DL1_PID $DL2_PID $DL3_PID $UL1_PID $UL2_PID $UL3_PID 2>/dev/null || true
 sleep 2
-{ kill -9 $DL1_PID $UL1_PID 2>/dev/null || true; } > /dev/null 2>&1
+{ kill -9 $DL1_PID $DL2_PID $DL3_PID $UL1_PID $UL2_PID $UL3_PID 2>/dev/null || true; } > /dev/null 2>&1
 sleep 1
-echo "  ✓ UE1 트래픽 중단됨"
+echo "  ✓ 모든 트래픽 중단됨"
 echo ""
 
 # 20초 대기
@@ -161,9 +206,9 @@ done
 printf "\n"
 echo ""
 
-# Phase 3: UE1만 DSCP=14 (20초)
-echo "[$(timestamp)] Phase 3: UE1만 트래픽 시작 (DSCP=14/0x38, 20초)..."
-# UE1 DL 트래픽
+# Phase 3: UE1만 DSCP=14, UE2/UE3는 DSCP=0 (20초)
+echo "[$(timestamp)] Phase 3: UE1만 DSCP=14, UE2/UE3는 DSCP=0으로 트래픽 시작 (20초)..."
+# UE1 DL 트래픽 (DSCP=14)
 iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -S 0x38 > /tmp/iperf3_dl1.log 2>&1 &
 DL1_PID=$!
 sleep 1
@@ -174,7 +219,29 @@ else
     cat /tmp/iperf3_dl1.log | tail -10
 fi
 
-# UE1 UL 트래픽
+# UE2 DL 트래픽 (DSCP=0)
+iperf3 -c 10.45.0.3 -t 20 -p 6501 -i 1 -S 0x00 > /tmp/iperf3_dl2.log 2>&1 &
+DL2_PID=$!
+sleep 1
+if kill -0 $DL2_PID 2>/dev/null; then
+    echo "  ✓ UE2 DL 트래픽 시작됨 (PID: $DL2_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE2 DL 트래픽 시작 실패!"
+    cat /tmp/iperf3_dl2.log | tail -10
+fi
+
+# UE3 DL 트래픽 (DSCP=0)
+iperf3 -c 10.45.0.4 -t 20 -p 6502 -i 1 -S 0x00 > /tmp/iperf3_dl3.log 2>&1 &
+DL3_PID=$!
+sleep 1
+if kill -0 $DL3_PID 2>/dev/null; then
+    echo "  ✓ UE3 DL 트래픽 시작됨 (PID: $DL3_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE3 DL 트래픽 시작 실패!"
+    cat /tmp/iperf3_dl3.log | tail -10
+fi
+
+# UE1 UL 트래픽 (DSCP=14)
 sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 -S 0x38 > /tmp/iperf3_ul1.log 2>&1 &
 UL1_PID=$!
 sleep 1
@@ -183,6 +250,28 @@ if kill -0 $UL1_PID 2>/dev/null; then
 else
     echo "  ✗ UE1 UL 트래픽 시작 실패!"
     cat /tmp/iperf3_ul1.log | tail -10
+fi
+
+# UE2 UL 트래픽 (DSCP=0)
+sudo ip netns exec ue2 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6601 -i 1 -S 0x00 > /tmp/iperf3_ul2.log 2>&1 &
+UL2_PID=$!
+sleep 1
+if kill -0 $UL2_PID 2>/dev/null; then
+    echo "  ✓ UE2 UL 트래픽 시작됨 (PID: $UL2_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE2 UL 트래픽 시작 실패!"
+    cat /tmp/iperf3_ul2.log | tail -10
+fi
+
+# UE3 UL 트래픽 (DSCP=0)
+sudo ip netns exec ue3 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6602 -i 1 -S 0x00 > /tmp/iperf3_ul3.log 2>&1 &
+UL3_PID=$!
+sleep 1
+if kill -0 $UL3_PID 2>/dev/null; then
+    echo "  ✓ UE3 UL 트래픽 시작됨 (PID: $UL3_PID, DSCP 0/ToS 0x00)"
+else
+    echo "  ✗ UE3 UL 트래픽 시작 실패!"
+    cat /tmp/iperf3_ul3.log | tail -10
 fi
 echo ""
 
@@ -204,5 +293,13 @@ echo ""
 echo "로그 확인:"
 echo "  tail -f /tmp/gnb.log | grep \"STEP1-SDAP\""
 echo "  tail -f /tmp/gnb.log | grep \"STEP6-SCHED\""
+
+
+
+
+
+
+
+
 
 
