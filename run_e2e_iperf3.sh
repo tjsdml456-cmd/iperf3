@@ -1,4 +1,3 @@
-  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              run_iperf3.sh
 #!/bin/bash
 # set -e 제거 (에러가 발생해도 계속 진행)
 
