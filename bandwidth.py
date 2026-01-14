@@ -261,12 +261,13 @@ def parse_prb_bandwidth_log(log_file: str, scs_khz: Optional[int] = None) -> Dic
                     prb_end = int(match.group(5))
                     symb_start = int(match.group(6))
                     symb_end = int(match.group(7))
+                    # 수정: modulation은 group(8)이어야 함 (group(7)은 symb_end)
+                    modulation = match.group(8) if match.group(8) else None
                     
                     prb_count = prb_end - prb_start
                     symb_count = symb_end - symb_start
                     prb_symb = prb_count * symb_count  # 실제 자원: PRB × Symbols
                     bandwidth_mhz = prb_count * prb_bandwidth_mhz
-                    modulation = match.group(7) if match.group(7) else None
                     
                     try:
                         timestamp = datetime.fromisoformat(timestamp_str)
@@ -449,39 +450,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
                 avg_occupied_bw_mhz = avg_prb * prb_bandwidth_mhz
                 
-                # 추가: 실제 사용된 PRB 기반 대역폭 계산
-                # 문제: 기존 방식(weighted_sum_prb / total_symbols)은 grant 개수와 무관하게 
-                #       PRB가 같으면 대역폭이 같게 나옴
-                # 해결: 각 grant의 PRB를 grant 빈도로 가중하여 계산
-                
-                # 각 grant의 PRB를 합산 (grant당 PRB의 합)
-                sum_prb_count = sum(e['prb_count'] for e in window_entries)
-                num_grants = len(window_entries)
-                
-                # grant당 평균 PRB
-                avg_prb_per_grant = sum_prb_count / num_grants if num_grants > 0 else 0.0
-                
-                # grant 빈도: 1초당 grant 수
-                grant_frequency = num_grants / slots_per_sec if slots_per_sec > 0 else 0.0
-                
-                # 실제 평균 PRB: grant당 평균 PRB × grant 빈도
-                # 또는 더 간단하게: sum_prb_count를 1초로 나눈 값
-                # 하지만 이건 grant가 많을수록 커지는 문제
-                
-                # 가장 합리적인 방법: sum_prb_symb를 기반으로 한 avg_prb를 사용하되,
-                # grant 빈도를 고려한 보정값 계산
-                # 실제로는 avg_prb가 맞지만, 사용자가 원하는 것은 grant당 PRB를 반영한 값
-                
                 # 실제 평균 PRB는 수식 5에 따라 계산된 avg_prb를 사용
-                # avg_prb = sum_prb_symb / (slots_per_sec * symbols_per_slot)
-                # 이것이 실제 평균 동시 점유 PRB입니다
-                # 
-                # 참고: 이 값이 작게 나올 수 있는 이유:
-                # - avg_prb는 "시간 평균 동시 점유 PRB"이므로, grant가 산발적으로 발생하면
-                #   대부분의 시간에는 자원을 사용하지 않아 평균값이 작아집니다
-                # - 예: 1초에 100개 grant가 각각 10 PRB × 5 symbol을 사용하면
-                #   sum_prb_symb = 5,000, total_capacity = 14,000 (SCS=15kHz)
-                #   avg_prb = 5,000 / 14,000 = 0.36 PRB
                 actual_avg_prb = avg_prb  # 수식 5에 따른 정확한 값
                 
                 # 실제 사용 대역폭 (Hz 단위로 저장)
@@ -593,39 +562,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
                 avg_occupied_bw_mhz = avg_prb * prb_bandwidth_mhz
                 
-                # 추가: 실제 사용된 PRB 기반 대역폭 계산
-                # 문제: 기존 방식(weighted_sum_prb / total_symbols)은 grant 개수와 무관하게 
-                #       PRB가 같으면 대역폭이 같게 나옴
-                # 해결: 각 grant의 PRB를 grant 빈도로 가중하여 계산
-                
-                # 각 grant의 PRB를 합산 (grant당 PRB의 합)
-                sum_prb_count = sum(e['prb_count'] for e in window_entries)
-                num_grants = len(window_entries)
-                
-                # grant당 평균 PRB
-                avg_prb_per_grant = sum_prb_count / num_grants if num_grants > 0 else 0.0
-                
-                # grant 빈도: 1초당 grant 수
-                grant_frequency = num_grants / slots_per_sec if slots_per_sec > 0 else 0.0
-                
-                # 실제 평균 PRB: grant당 평균 PRB × grant 빈도
-                # 또는 더 간단하게: sum_prb_count를 1초로 나눈 값
-                # 하지만 이건 grant가 많을수록 커지는 문제
-                
-                # 가장 합리적인 방법: sum_prb_symb를 기반으로 한 avg_prb를 사용하되,
-                # grant 빈도를 고려한 보정값 계산
-                # 실제로는 avg_prb가 맞지만, 사용자가 원하는 것은 grant당 PRB를 반영한 값
-                
                 # 실제 평균 PRB는 수식 5에 따라 계산된 avg_prb를 사용
-                # avg_prb = sum_prb_symb / (slots_per_sec * symbols_per_slot)
-                # 이것이 실제 평균 동시 점유 PRB입니다
-                # 
-                # 참고: 이 값이 작게 나올 수 있는 이유:
-                # - avg_prb는 "시간 평균 동시 점유 PRB"이므로, grant가 산발적으로 발생하면
-                #   대부분의 시간에는 자원을 사용하지 않아 평균값이 작아집니다
-                # - 예: 1초에 100개 grant가 각각 10 PRB × 5 symbol을 사용하면
-                #   sum_prb_symb = 5,000, total_capacity = 14,000 (SCS=15kHz)
-                #   avg_prb = 5,000 / 14,000 = 0.36 PRB
                 actual_avg_prb = avg_prb  # 수식 5에 따른 정확한 값
                 
                 # 실제 사용 대역폭 (Hz 단위로 저장)
@@ -978,3 +915,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
