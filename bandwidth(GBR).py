@@ -244,7 +244,7 @@ def parse_prb_bandwidth_log(log_file: str, scs_khz: Optional[int] = None) -> Dic
                         'symb_start': symb_start,
                         'symb_end': symb_end,
                         'symb_count': symb_count,
-                        'prb_symb': prb_symb,  # PRB × Symbols (실제 자원)
+                        'prb_symb': prb_count * symb_count,  # 실제 자원: PRB × Symbols
                         'bandwidth_mhz': bandwidth_mhz,
                         'bandwidth_khz': bandwidth_mhz * 1000.0,
                         'raw_line': line.strip()
@@ -261,7 +261,6 @@ def parse_prb_bandwidth_log(log_file: str, scs_khz: Optional[int] = None) -> Dic
                     prb_end = int(match.group(5))
                     symb_start = int(match.group(6))
                     symb_end = int(match.group(7))
-                    # 수정: modulation은 group(8)이어야 함 (group(7)은 symb_end)
                     modulation = match.group(8) if match.group(8) else None
                     
                     prb_count = prb_end - prb_start
@@ -285,7 +284,7 @@ def parse_prb_bandwidth_log(log_file: str, scs_khz: Optional[int] = None) -> Dic
                         'symb_start': symb_start,
                         'symb_end': symb_end,
                         'symb_count': symb_count,
-                        'prb_symb': prb_symb,  # PRB × Symbols (실제 자원)
+                        'prb_symb': prb_count * symb_count,  # 실제 자원: PRB × Symbols
                         'bandwidth_mhz': bandwidth_mhz,
                         'bandwidth_khz': bandwidth_mhz * 1000.0,
                         'modulation': modulation,  # MCS 정보 (QPSK, QAM16, QAM64, QAM256 등)
@@ -326,6 +325,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
     4. 1초 동안 사용한 총 자원: A_UE = Σ_{s ∈ 1sec} N_PRB^(s) × N_sym^(s)
     5. 평균 동시 점유 PRB: N_PRB_bar = A_UE / (N_slot/sec × N_sym)
     6. 평균 동시 점유 대역폭: B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
+    7. 예상 Throughput: Throughput ≈ B_UE × η_MCS × N_layer (동일한 윈도우에서 계산)
     
     Args:
         bandwidth_data: parse_prb_bandwidth_log()의 결과
@@ -335,7 +335,8 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
         time_window_sec: 집계 시간 윈도우 (초, 기본값 1.0)
         
     Returns:
-        {ue_index: [{'timestamp': ..., 'dl_sum_prb_symb': ..., 'dl_avg_prb': ..., 'dl_utilization': ..., ...}]} 딕셔너리
+        {ue_index: [{'timestamp': ..., 'dl_sum_prb_symb': ..., 'dl_avg_prb': ..., 'dl_utilization': ..., 
+                     'dl_actual_occupied_bw_mhz': ..., 'dl_estimated_throughput_mbps': ..., ...}]} 딕셔너리
     """
     ue_bandwidth_per_sec = defaultdict(list)
     
@@ -388,7 +389,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
             if window_start_sec in processed_dl_windows:
                 continue
             processed_dl_windows.add(window_start_sec)
-            window_end = window_start_sec + timedelta(seconds=1)
+            window_end = window_start_sec + timedelta(seconds=time_window_sec)
             # 윈도우 내의 모든 entry를 찾기 (전체 리스트에서)
             window_entries = [e for e in all_dl
                             if window_start_sec <= e['timestamp'] < window_end]
@@ -401,7 +402,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
             if window_start_sec in processed_ul_windows:
                 continue
             processed_ul_windows.add(window_start_sec)
-            window_end = window_start_sec + timedelta(seconds=1)
+            window_end = window_start_sec + timedelta(seconds=time_window_sec)
             # 윈도우 내의 모든 entry를 찾기 (전체 리스트에서)
             window_entries = [e for e in all_ul
                             if window_start_sec <= e['timestamp'] < window_end]
@@ -426,7 +427,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
             if window_key in processed_dl_windows:
                 continue
             
-            window_end = window_start_sec + timedelta(seconds=1)
+            window_end = window_start_sec + timedelta(seconds=time_window_sec)
             processed_dl_windows.add(window_key)
             
             # 윈도우 내의 모든 PRB 할당을 합산 (전체 리스트에서)
@@ -446,22 +447,15 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # 절대 점유율 (utilization): BWP 전체 대비 사용 비율 (0~1)
                 utilization = sum_prb_symb / capacity_prb_symb_per_sec if capacity_prb_symb_per_sec > 0 else 0.0
                 
-                # 수식 6: 평균 동시 점유 대역폭 (MHz)
+                # 수식 6: 평균 동시 점유 대역폭 (MHz) - 동일한 윈도우에서 계산
                 # B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
-                avg_occupied_bw_mhz = avg_prb * prb_bandwidth_mhz
-                
-                # 실제 평균 PRB는 수식 5에 따라 계산된 avg_prb를 사용
                 actual_avg_prb = avg_prb  # 수식 5에 따른 정확한 값
+                actual_occupied_bw_mhz = actual_avg_prb * prb_bandwidth_mhz  # 실제 사용 대역폭 (MHz)
+                actual_occupied_bw_hz = actual_avg_prb * prb_bandwidth_hz  # 실제 사용 대역폭 (Hz)
                 
-                # 실제 사용 대역폭 (Hz 단위로 저장)
-                # 수식 6: B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
-                # PRB당 대역폭을 Hz로 변환: B_PRB^(Hz) = B_PRB^(MHz) × 1,000,000
-                actual_occupied_bw_hz = actual_avg_prb * prb_bandwidth_hz  # Hz 단위
-                actual_occupied_bw_mhz = actual_avg_prb * prb_bandwidth_mhz  # 비교용으로 유지
-                
-                # 수식 8: 예상 Throughput 계산 (참고식)
+                # 수식 8: 예상 Throughput 계산 - 동일한 윈도우에서 계산
                 # Throughput ≈ B_UE × η_MCS × N_layer
-                # 윈도우 내의 평균 modulation 계산
+                # 윈도우 내의 평균 modulation 계산 (대역폭과 동일한 윈도우 사용)
                 modulations = [e.get('modulation') for e in window_entries if e.get('modulation')]
                 avg_spectral_efficiency = 0.0
                 if modulations:
@@ -473,7 +467,8 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # MIMO 레이어 수 (기본값 1, 나중에 옵션으로 설정 가능)
                 mimo_layers = 1  # TODO: 로그에서 추출하거나 옵션으로 설정
                 
-                # 예상 Throughput (Mbps) - 실제 사용 대역폭 기반으로 계산
+                # 예상 Throughput (Mbps) - 동일한 윈도우의 대역폭 기반으로 계산
+                # Throughput = B_UE × η_MCS × N_layer (동일한 윈도우)
                 estimated_throughput_mbps = actual_occupied_bw_mhz * avg_spectral_efficiency * mimo_layers
                 
                 # Share 계산: 이 UE의 자원 점유 비율
@@ -519,12 +514,12 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 bw_entry['dl_avg_prb'] = avg_prb
                 bw_entry['dl_actual_avg_prb'] = actual_avg_prb  # 수식 5에 따른 평균 PRB
                 bw_entry['dl_utilization'] = utilization
-                bw_entry['dl_avg_occupied_bw_mhz'] = avg_occupied_bw_mhz  # 기존 평균 방식
-                bw_entry['dl_actual_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 실제 사용 대역폭 (MHz)
-                bw_entry['dl_actual_occupied_bw_hz'] = actual_occupied_bw_hz  # 실제 사용 대역폭 (Hz)
+                bw_entry['dl_avg_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 기존 평균 방식 (제거 예정)
+                bw_entry['dl_actual_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 실제 사용 대역폭 (MHz) - 동일한 윈도우
+                bw_entry['dl_actual_occupied_bw_hz'] = actual_occupied_bw_hz  # 실제 사용 대역폭 (Hz) - 동일한 윈도우
                 bw_entry['dl_share'] = dl_share
                 bw_entry['dl_count'] = len(window_entries)
-                bw_entry['dl_estimated_throughput_mbps'] = estimated_throughput_mbps
+                bw_entry['dl_estimated_throughput_mbps'] = estimated_throughput_mbps  # 동일한 윈도우에서 계산
                 bw_entry['dl_spectral_efficiency'] = avg_spectral_efficiency
         
         # UL 처리: 1초 윈도우별로 집계
@@ -538,7 +533,7 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
             if window_key in processed_ul_windows:
                 continue
             
-            window_end = window_start_sec + timedelta(seconds=1)
+            window_end = window_start_sec + timedelta(seconds=time_window_sec)
             processed_ul_windows.add(window_key)
             
             # 윈도우 내의 모든 PRB 할당을 합산 (전체 리스트에서)
@@ -558,22 +553,15 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # 절대 점유율 (utilization): BWP 전체 대비 사용 비율 (0~1)
                 utilization = sum_prb_symb / capacity_prb_symb_per_sec if capacity_prb_symb_per_sec > 0 else 0.0
                 
-                # 수식 6: 평균 동시 점유 대역폭 (MHz)
+                # 수식 6: 평균 동시 점유 대역폭 (MHz) - 동일한 윈도우에서 계산
                 # B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
-                avg_occupied_bw_mhz = avg_prb * prb_bandwidth_mhz
-                
-                # 실제 평균 PRB는 수식 5에 따라 계산된 avg_prb를 사용
                 actual_avg_prb = avg_prb  # 수식 5에 따른 정확한 값
+                actual_occupied_bw_mhz = actual_avg_prb * prb_bandwidth_mhz  # 실제 사용 대역폭 (MHz)
+                actual_occupied_bw_hz = actual_avg_prb * prb_bandwidth_hz  # 실제 사용 대역폭 (Hz)
                 
-                # 실제 사용 대역폭 (Hz 단위로 저장)
-                # 수식 6: B_UE_bar^(MHz) = N_PRB_bar × B_PRB^(MHz)
-                # PRB당 대역폭을 Hz로 변환: B_PRB^(Hz) = B_PRB^(MHz) × 1,000,000
-                actual_occupied_bw_hz = actual_avg_prb * prb_bandwidth_hz  # Hz 단위
-                actual_occupied_bw_mhz = actual_avg_prb * prb_bandwidth_mhz  # 비교용으로 유지
-                
-                # 수식 8: 예상 Throughput 계산 (참고식)
+                # 수식 8: 예상 Throughput 계산 - 동일한 윈도우에서 계산
                 # Throughput ≈ B_UE × η_MCS × N_layer
-                # 윈도우 내의 평균 modulation 계산
+                # 윈도우 내의 평균 modulation 계산 (대역폭과 동일한 윈도우 사용)
                 modulations = [e.get('modulation') for e in window_entries if e.get('modulation')]
                 avg_spectral_efficiency = 0.0
                 if modulations:
@@ -585,7 +573,8 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 # MIMO 레이어 수 (기본값 1, 나중에 옵션으로 설정 가능)
                 mimo_layers = 1  # TODO: 로그에서 추출하거나 옵션으로 설정
                 
-                # 예상 Throughput (Mbps) - 실제 사용 대역폭 기반으로 계산
+                # 예상 Throughput (Mbps) - 동일한 윈도우의 대역폭 기반으로 계산
+                # Throughput = B_UE × η_MCS × N_layer (동일한 윈도우)
                 estimated_throughput_mbps = actual_occupied_bw_mhz * avg_spectral_efficiency * mimo_layers
                 
                 # Share 계산: 이 UE의 자원 점유 비율
@@ -631,12 +620,12 @@ def calculate_bandwidth_per_second(bandwidth_data: Dict[str, Dict[str, List[Dict
                 bw_entry['ul_avg_prb'] = avg_prb
                 bw_entry['ul_actual_avg_prb'] = actual_avg_prb  # 수식 5에 따른 평균 PRB
                 bw_entry['ul_utilization'] = utilization
-                bw_entry['ul_avg_occupied_bw_mhz'] = avg_occupied_bw_mhz  # 기존 평균 방식
-                bw_entry['ul_actual_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 실제 사용 대역폭 (MHz)
-                bw_entry['ul_actual_occupied_bw_hz'] = actual_occupied_bw_hz  # 실제 사용 대역폭 (Hz)
+                bw_entry['ul_avg_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 기존 평균 방식 (제거 예정)
+                bw_entry['ul_actual_occupied_bw_mhz'] = actual_occupied_bw_mhz  # 실제 사용 대역폭 (MHz) - 동일한 윈도우
+                bw_entry['ul_actual_occupied_bw_hz'] = actual_occupied_bw_hz  # 실제 사용 대역폭 (Hz) - 동일한 윈도우
                 bw_entry['ul_share'] = ul_share
                 bw_entry['ul_count'] = len(window_entries)
-                bw_entry['ul_estimated_throughput_mbps'] = estimated_throughput_mbps
+                bw_entry['ul_estimated_throughput_mbps'] = estimated_throughput_mbps  # 동일한 윈도우에서 계산
                 bw_entry['ul_spectral_efficiency'] = avg_spectral_efficiency
         
         # 타임스탬프 기준으로 정렬
@@ -652,9 +641,9 @@ def print_bandwidth_summary(bandwidth_per_sec: Dict[int, List[Dict]]):
     print("주요 지표 설명:")
     print("  - sum_prb_symb (A_UE): 1초 동안 사용한 총 자원 (PRB × Symbol)")
     print("  - avg_prb (N_PRB_bar): 평균 동시 점유 PRB 수 = A_UE / (N_slot/sec × N_sym)")
-    print("  - avg_occupied_bw_mhz (B_UE_bar): 평균 동시 점유 대역폭 = N_PRB_bar × B_PRB^(MHz)")
+    print("  - actual_occupied_bw_mhz (B_UE_bar): 평균 동시 점유 대역폭 = N_PRB_bar × B_PRB^(MHz)")
     print("  - estimated_throughput_mbps: 예상 Throughput (수식 8) = B_UE × η_MCS × N_layer")
-    print("    * η_MCS: MCS 스펙트럼 효율 (bps/Hz), N_layer: MIMO 레이어 수 (기본값 1)")
+    print("    * 동일한 1초 윈도우에서 대역폭과 throughput 모두 계산됨")
     print("=" * 100)
     
     for ue_idx in sorted(bandwidth_per_sec.keys()):
@@ -669,9 +658,9 @@ def print_bandwidth_summary(bandwidth_per_sec: Dict[int, List[Dict]]):
         dl_prb_symbs = [e['dl_sum_prb_symb'] for e in entries if e['dl_sum_prb_symb'] > 0]
         dl_avg_prbs = [e['dl_avg_prb'] for e in entries if e['dl_avg_prb'] > 0]
         dl_utilizations = [e['dl_utilization'] for e in entries if e['dl_utilization'] > 0]
-        dl_avg_bws = [e['dl_avg_occupied_bw_mhz'] for e in entries if e['dl_avg_occupied_bw_mhz'] > 0]
+        dl_actual_bws = [e.get('dl_actual_occupied_bw_mhz', 0.0) for e in entries if e.get('dl_actual_occupied_bw_mhz', 0) > 0]
         dl_shares = [e['dl_share'] for e in entries if e['dl_share'] > 0]
-        dl_counts = [e['dl_count'] for e in entries if e['dl_count'] > 0]
+        dl_est_tputs = [e['dl_estimated_throughput_mbps'] for e in entries if e.get('dl_estimated_throughput_mbps', 0) > 0]
         
         if dl_prb_symbs:
             print(f"  DL (Downlink) 자원 점유:")
@@ -686,23 +675,17 @@ def print_bandwidth_summary(bandwidth_per_sec: Dict[int, List[Dict]]):
                 print(f"      - 최소값: {min(dl_utilizations):.1%}")
                 print(f"      - 최대값: {max(dl_utilizations):.1%}")
                 print(f"      - 평균값: {sum(dl_utilizations) / len(dl_utilizations):.1%}")
-            print(f"    avg_occupied_bw_mhz (평균 동시 점유 대역폭 - 기존 방식):")
-            print(f"      - 평균값: {sum(dl_avg_bws) / len(dl_avg_bws):.3f} MHz")
-            # 실제 사용 대역폭 통계 (MHz 단위)
-            dl_actual_bws = [e.get('dl_actual_occupied_bw_mhz', 0.0) for e in entries if e.get('dl_actual_occupied_bw_mhz', 0) > 0]
             if dl_actual_bws:
                 print(f"    actual_occupied_bw_mhz (실제 사용 대역폭 - 수식 5 기반):")
                 print(f"      - 최소값: {min(dl_actual_bws):.3f} MHz")
                 print(f"      - 최대값: {max(dl_actual_bws):.3f} MHz")
                 print(f"      - 평균값: {sum(dl_actual_bws) / len(dl_actual_bws):.3f} MHz")
-            # 예상 Throughput 정보
-            dl_est_tputs = [e['dl_estimated_throughput_mbps'] for e in entries if e.get('dl_estimated_throughput_mbps', 0) > 0]
             if dl_est_tputs:
-                print(f"    estimated_throughput_mbps (예상 Throughput, 수식 8):")
+                print(f"    estimated_throughput_mbps (예상 Throughput, 수식 8 - 동일한 윈도우):")
                 print(f"      - 최소값: {min(dl_est_tputs):.2f} Mbps")
                 print(f"      - 최대값: {max(dl_est_tputs):.2f} Mbps")
                 print(f"      - 평균값: {sum(dl_est_tputs) / len(dl_est_tputs):.2f} Mbps")
-                print(f"      - 수식: Throughput ≈ B_UE × η_MCS × N_layer")
+                print(f"      - 수식: Throughput = B_UE × η_MCS × N_layer (동일한 1초 윈도우)")
             if dl_shares:
                 print(f"    share (UE 간 상대 점유 비율):")
                 print(f"      - 최소값: {min(dl_shares):.1%}")
@@ -716,9 +699,9 @@ def print_bandwidth_summary(bandwidth_per_sec: Dict[int, List[Dict]]):
         ul_prb_symbs = [e['ul_sum_prb_symb'] for e in entries if e['ul_sum_prb_symb'] > 0]
         ul_avg_prbs = [e['ul_avg_prb'] for e in entries if e['ul_avg_prb'] > 0]
         ul_utilizations = [e['ul_utilization'] for e in entries if e['ul_utilization'] > 0]
-        ul_avg_bws = [e['ul_avg_occupied_bw_mhz'] for e in entries if e['ul_avg_occupied_bw_mhz'] > 0]
+        ul_actual_bws = [e.get('ul_actual_occupied_bw_mhz', 0.0) for e in entries if e.get('ul_actual_occupied_bw_mhz', 0) > 0]
         ul_shares = [e['ul_share'] for e in entries if e['ul_share'] > 0]
-        ul_counts = [e['ul_count'] for e in entries if e['ul_count'] > 0]
+        ul_est_tputs = [e['ul_estimated_throughput_mbps'] for e in entries if e.get('ul_estimated_throughput_mbps', 0) > 0]
         
         if ul_prb_symbs:
             print(f"  UL (Uplink) 자원 점유:")
@@ -733,23 +716,17 @@ def print_bandwidth_summary(bandwidth_per_sec: Dict[int, List[Dict]]):
                 print(f"      - 최소값: {min(ul_utilizations):.1%}")
                 print(f"      - 최대값: {max(ul_utilizations):.1%}")
                 print(f"      - 평균값: {sum(ul_utilizations) / len(ul_utilizations):.1%}")
-            print(f"    avg_occupied_bw_mhz (평균 동시 점유 대역폭 - 기존 방식):")
-            print(f"      - 평균값: {sum(ul_avg_bws) / len(ul_avg_bws):.3f} MHz")
-            # 실제 사용 대역폭 통계 (MHz 단위)
-            ul_actual_bws = [e.get('ul_actual_occupied_bw_mhz', 0.0) for e in entries if e.get('ul_actual_occupied_bw_mhz', 0) > 0]
             if ul_actual_bws:
                 print(f"    actual_occupied_bw_mhz (실제 사용 대역폭 - 수식 5 기반):")
                 print(f"      - 최소값: {min(ul_actual_bws):.3f} MHz")
                 print(f"      - 최대값: {max(ul_actual_bws):.3f} MHz")
                 print(f"      - 평균값: {sum(ul_actual_bws) / len(ul_actual_bws):.3f} MHz")
-            # 예상 Throughput 정보
-            ul_est_tputs = [e['ul_estimated_throughput_mbps'] for e in entries if e.get('ul_estimated_throughput_mbps', 0) > 0]
             if ul_est_tputs:
-                print(f"    estimated_throughput_mbps (예상 Throughput, 수식 8):")
+                print(f"    estimated_throughput_mbps (예상 Throughput, 수식 8 - 동일한 윈도우):")
                 print(f"      - 최소값: {min(ul_est_tputs):.2f} Mbps")
                 print(f"      - 최대값: {max(ul_est_tputs):.2f} Mbps")
                 print(f"      - 평균값: {sum(ul_est_tputs) / len(ul_est_tputs):.2f} Mbps")
-                print(f"      - 수식: Throughput ≈ B_UE × η_MCS × N_layer")
+                print(f"      - 수식: Throughput = B_UE × η_MCS × N_layer (동일한 1초 윈도우)")
             if ul_shares:
                 print(f"    share (UE 간 상대 점유 비율):")
                 print(f"      - 최소값: {min(ul_shares):.1%}")
@@ -787,18 +764,20 @@ def print_bandwidth_detailed_per_sec(bandwidth_per_sec: Dict[int, List[Dict]],
         print(f"UE{ue_idx_print} 상세 정보 (전체 {len(entries)}개, 시간 순서대로 정렬)")
         print(f"UE별 기준 시간: {first_timestamp.isoformat()}")
         print(f"{'=' * 100}")
-        print(f"{'시간(분:초)':<15} {'DL PRB×Symb':<15} {'DL avgPRB':<12} {'DL util(%)':<12} {'DL BW(MHz)':<15} {'DL share':<10} {'UL PRB×Symb':<15} {'UL avgPRB':<12} {'UL util(%)':<12} {'UL BW(MHz)':<15} {'UL share':<10}")
+        print(f"{'시간(hh:mm:ss)':<15} {'DL PRB×Symb':<15} {'DL avgPRB':<12} {'DL util(%)':<12} {'DL BW(MHz)':<15} {'DL share':<10} {'UL PRB×Symb':<15} {'UL avgPRB':<12} {'UL util(%)':<12} {'UL BW(MHz)':<15} {'UL share':<10}")
         print("-" * 150)
         print("  참고: DL/UL BW(MHz)는 실제 사용 대역폭 (수식 5 기반: avg_prb × B_PRB)")
         print("        avg_prb는 시간 평균 동시 점유 PRB이므로, grant가 산발적이면 작게 나올 수 있습니다")
+        print("        Throughput도 동일한 1초 윈도우에서 계산됩니다")
         print("-" * 150)
         
         for entry in entries:
             if entry['timestamp'] is not None:
-                # 분:초.XX 형식으로 표시 (시간 제외, 소수점 둘째 자리)
+                # hh:mm:ss 형식으로 표시
+                hours = entry['timestamp'].hour
                 minutes = entry['timestamp'].minute
-                seconds = entry['timestamp'].second + entry['timestamp'].microsecond / 1000000.0
-                time_str = f"{minutes:02d}:{seconds:05.2f}"
+                seconds = entry['timestamp'].second
+                time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             else:
                 time_str = "N/A"
             
