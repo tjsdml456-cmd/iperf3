@@ -8,7 +8,7 @@ import re
 import sys
 from collections import defaultdict
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def parse_throughput_log(log_file: str) -> Dict[int, List[Dict]]:
     """
@@ -107,147 +107,6 @@ def get_global_first_timestamp(ue_data: Dict[int, List[Dict]]) -> datetime:
                     global_first = entry['timestamp']
     return global_first
 
-def calculate_throughput_from_tbs(ue_data: Dict[int, List[Dict]], time_window_ms: int = 1000) -> Dict[int, List[Dict]]:
-    """
-    HARQ ACK 로그로부터 정확한 throughput을 계산합니다.
-    성공한 전송(ACK=1)만 누적하여 계산합니다.
-    
-    Args:
-        ue_data: HARQ ACK 로그 데이터
-        time_window_ms: Throughput 계산 시간 윈도우 (밀리초)
-    
-    Returns:
-        계산된 throughput 정보를 추가한 데이터
-    """
-    for ue_idx, entries in ue_data.items():
-        # HARQ ACK 로그만 필터링 (성공한 전송만 이미 필터링됨)
-        harq_ack_entries = [e for e in entries if e['type'] == 'harq_ack_dl']
-        
-        if not harq_ack_entries:
-            continue
-        
-        # 타임스탬프 기준으로 정렬
-        harq_entries_sorted = sorted(
-            harq_ack_entries,
-            key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max
-        )
-        
-        # 시간 윈도우를 기반으로 throughput 계산
-        calculated_throughputs = []
-        
-        for i, entry in enumerate(harq_entries_sorted):
-            if entry['timestamp'] is None:
-                continue
-            
-            window_start = entry['timestamp']
-            window_end = window_start + timedelta(milliseconds=time_window_ms)
-            
-            # 윈도우 내의 성공한 TBS 합계 계산
-            total_bytes = 0
-            count = 0
-            
-            for harq_entry in harq_entries_sorted[i:]:
-                if harq_entry['timestamp'] is None:
-                    continue
-                if harq_entry['timestamp'] > window_end:
-                    break
-                # 이미 성공한 전송만 저장되어 있음
-                total_bytes += harq_entry['tbs_bytes']
-                count += 1
-            
-            # Throughput 계산: (bytes * 8) / time_window_ms = kbps
-            throughput_kbps = (total_bytes * 8.0) / time_window_ms
-            throughput_mbps = throughput_kbps / 1000.0
-            
-            calculated_throughputs.append({
-                'timestamp': entry['timestamp'],
-                'calculated_throughput_kbps': throughput_kbps,
-                'calculated_throughput_mbps': throughput_mbps,
-                'window_bytes': total_bytes,
-                'window_count': count,
-                'window_start': window_start,
-                'window_end': window_end
-            })
-        
-        # 계산된 throughput을 데이터에 추가
-        for calc in calculated_throughputs:
-            ue_data[ue_idx].append({
-                'line': 0,
-                'timestamp': calc['timestamp'],
-                'timestamp_str': calc['timestamp'].isoformat() if calc['timestamp'] else '',
-                'type': 'calculated_from_harq',
-                'dl_brate_kbps': calc['calculated_throughput_kbps'],
-                'dl_brate_mbps': calc['calculated_throughput_mbps'],
-                'sum_dl_tb_bytes': calc['window_bytes'],
-                'period_ms': time_window_ms,
-                'dl_nof_ok': calc['window_count'],
-                'total_brate_kbps': calc['calculated_throughput_kbps'],
-                'total_brate_mbps': calc['calculated_throughput_mbps'],
-                'ul_brate_kbps': 0.0,
-                'ul_brate_mbps': 0.0,
-                'ul_nof_ok': 0
-            })
-    
-    return ue_data
-
-def calculate_throughput_from_tbs(ue_data: Dict[int, List[Dict]], time_window_ms: int = 1000) -> Dict[int, List[Dict]]:
-    """
-    TBS 로그로부터 throughput을 계산합니다.
-    
-    Args:
-        ue_data: TBS 로그 데이터
-        time_window_ms: Throughput 계산 시간 윈도우 (밀리초)
-    
-    Returns:
-        계산된 throughput 정보를 추가한 데이터
-    """
-    
-    for ue_idx, entries in ue_data.items():
-        # TBS 로그만 필터링
-        tbs_entries = [e for e in entries if e['type'].startswith('tbs_')]
-        calculated_entries = [e for e in entries if e['type'] == 'calculated']
-        
-        if not tbs_entries:
-            continue
-        
-        # 타임스탬프 기준으로 정렬
-        tbs_entries_sorted = sorted(
-            tbs_entries,
-            key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max
-        )
-        
-        # 시간 윈도우를 기반으로 throughput 계산
-        for i, entry in enumerate(tbs_entries_sorted):
-            if entry['timestamp'] is None:
-                continue
-            
-            window_start = entry['timestamp']
-            window_end = window_start + timedelta(milliseconds=time_window_ms)
-            
-            # 윈도우 내의 TBS 합계 계산
-            total_bytes = 0
-            count = 0
-            
-            for tbs_entry in tbs_entries_sorted[i:]:
-                if tbs_entry['timestamp'] is None:
-                    continue
-                if tbs_entry['timestamp'] > window_end:
-                    break
-                if tbs_entry['direction'] == 'DL':  # DL만 계산 (또는 UL만)
-                    total_bytes += tbs_entry['tbs_bytes']
-                    count += 1
-            
-            # Throughput 계산: (bytes * 8) / time_window_ms = kbps
-            throughput_kbps = (total_bytes * 8.0) / time_window_ms
-            throughput_mbps = throughput_kbps / 1000.0
-            
-            entry['calculated_throughput_kbps'] = throughput_kbps
-            entry['calculated_throughput_mbps'] = throughput_mbps
-            entry['window_bytes'] = total_bytes
-            entry['window_count'] = count
-    
-    return ue_data
-
 def print_throughput_summary(ue_data: Dict[int, List[Dict]]):
     """UE별 throughput 요약 정보를 출력합니다."""
     print("=" * 100)
@@ -335,38 +194,39 @@ def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None
         print(f"UE{ue} Throughput 상세 정보 (시스템 계산값, 동적 period)")
         print(f"전체 {len(calculated_entries)}개 | {time_label}: {first_timestamp.isoformat()}")
         print(f"{'=' * 100}")
-        print(f"{'시간(분:초)':<15} {'DL (Mbps)':<12} {'UL (Mbps)':<12} {'Total (Mbps)':<15} {'Period (ms)':<12} {'DL Bytes':<12} {'HARQ OK':<10}")
+        print(f"{'상대시간(초)':<15} {'절대시간':<20} {'DL (Mbps)':<12} {'UL (Mbps)':<12} {'Total (Mbps)':<15} {'Period (ms)':<12} {'DL Bytes':<12} {'HARQ OK':<10}")
         print("-" * 100)
         
+        # 중복 제거: 같은 타임스탬프를 가진 항목은 하나만 출력
+        seen_timestamps = set()
+        unique_entries = []
         for entry in calculated_entries:
             if entry['timestamp'] is not None:
-                minutes = entry['timestamp'].minute
-                seconds = entry['timestamp'].second + entry['timestamp'].microsecond / 1000000.0
-                abs_time_str = f"{minutes:02d}:{seconds:05.2f}"
+                # 타임스탬프를 초 단위로 반올림하여 중복 체크
+                ts_key = entry['timestamp'].replace(microsecond=0)
+                if ts_key not in seen_timestamps:
+                    seen_timestamps.add(ts_key)
+                    unique_entries.append(entry)
             else:
-                abs_time_str = "N/A"
-            
-            ul_display = f"{entry['ul_brate_mbps']:.2f}" if entry['ul_brate_mbps'] > 0 else "N/A"
-            
-            print(f"{abs_time_str:<15} "
-                  f"{entry['dl_brate_mbps']:<12.2f} "
-                  f"{ul_display:<12} "
-                  f"{entry['total_brate_mbps']:<15.2f} "
-                  f"{entry['period_ms']:<12} "
-                  f"{entry['sum_dl_tb_bytes']:<12} "
-                  f"{entry['dl_nof_ok']:<10}")
+                unique_entries.append(entry)
         
-        for entry in calculated_entries:
+        for entry in unique_entries:
             if entry['timestamp'] is not None:
-                minutes = entry['timestamp'].minute
-                seconds = entry['timestamp'].second + entry['timestamp'].microsecond / 1000000.0
-                abs_time_str = f"{minutes:02d}:{seconds:05.2f}"
+                # 상대 시간 계산 (초 단위)
+                time_diff = entry['timestamp'] - first_timestamp
+                rel_time_sec = time_diff.total_seconds()
+                
+                # 절대 시간 표시 (시:분:초.밀리초)
+                abs_time_str = entry['timestamp'].strftime("%H:%M:%S.%f")[:-3]  # 마이크로초를 밀리초로
+                rel_time_str = f"{rel_time_sec:.2f}"
             else:
                 abs_time_str = "N/A"
+                rel_time_str = "N/A"
             
             ul_display = f"{entry['ul_brate_mbps']:.2f}" if entry['ul_brate_mbps'] > 0 else "N/A"
             
-            print(f"{abs_time_str:<15} "
+            print(f"{rel_time_str:<15} "
+                  f"{abs_time_str:<20} "
                   f"{entry['dl_brate_mbps']:<12.2f} "
                   f"{ul_display:<12} "
                   f"{entry['total_brate_mbps']:<15.2f} "
