@@ -20,6 +20,14 @@ QFI=${QFI:-1}
 # 외부 서버 IP 설정
 EXTERNAL_SERVER_IP=${EXTERNAL_SERVER_IP:-10.45.0.1}
 
+# GBR/MBR 설정 (기본값, 환경변수로 오버라이드 가능)
+# 일반 GBR 5QI (예: 5QI=3): GBR 5Mbps (srsRAN 스케줄러에서 dl_gbr = 5Mbps로 사용)
+# delay_critical GBR 5QI (예: 5QI=85): GBR 25Mbps (srsRAN 스케줄러에서 dl_gbr = 25Mbps로 사용)
+GBR_NORMAL_DL=${GBR_NORMAL_DL:-5000000}   # 일반 GBR DL (5 Mbps)
+GBR_NORMAL_UL=${GBR_NORMAL_UL:-5000000}   # 일반 GBR UL (5 Mbps)
+GBR_DELAY_CRITICAL_DL=${GBR_DELAY_CRITICAL_DL:-25000000}  # delay_critical GBR DL (25 Mbps)
+GBR_DELAY_CRITICAL_UL=${GBR_DELAY_CRITICAL_UL:-25000000}  # delay_critical GBR UL (25 Mbps)
+
 # 타임스탬프 함수
 timestamp() {
     date '+%H:%M:%S'
@@ -59,13 +67,15 @@ check_http2_client() {
     fi
 }
 
-# 5QI 변경 함수
+# 5QI 변경 함수 (GBR/MBR 포함)
 change_5qi() {
     local supi=$1
     local new_5qi=$2
     local ue_name=$3
     local gbr_dl=${4:-0}  # Optional: GBR DL (bps), default 0
     local gbr_ul=${5:-0}  # Optional: GBR UL (bps), default 0
+    local mbr_dl=${6:-0}  # Optional: MBR DL (bps), default 0
+    local mbr_ul=${7:-0}  # Optional: MBR UL (bps), default 0
 
     echo "[$(timestamp)] $ue_name 5QI 변경 요청: 5QI=$new_5qi"
 
@@ -75,51 +85,16 @@ change_5qi() {
             echo "  ⚠ GBR QoS Flow (5QI=$new_5qi)이지만 GBR 값이 제공되지 않았습니다."
             echo "     SMF가 PCF에서 GBR 값을 가져오거나 기존 값을 유지합니다."
         else
-            echo "  GBR 값 제공: GBR_DL=${gbr_dl} bps, GBR_UL=${gbr_ul} bps"
+            echo "  GBR 값 제공: GBR_DL=${gbr_dl} bps ($(echo "scale=2; $gbr_dl/1000000" | bc 2>/dev/null || echo "$(($gbr_dl/1000000))") Mbps), GBR_UL=${gbr_ul} bps ($(echo "scale=2; $gbr_ul/1000000" | bc 2>/dev/null || echo "$(($gbr_ul/1000000))") Mbps)"
         fi
     fi
-
-    # nghttp2 클라이언트 사용 시도 (HTTP/2 네이티브 지원)
-    if command -v nghttp >/dev/null 2>&1; then
-        echo "  nghttp2 클라이언트 사용 중..."
-        # JSON 데이터를 임시 파일로 생성
-        json_data=$(mktemp)
-        # GBR 값이 제공된 경우에만 JSON에 포함
-        if [ $gbr_dl -gt 0 ] || [ $gbr_ul -gt 0 ]; then
-            echo "{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi, \"gbr_dl\": $gbr_dl, \"gbr_ul\": $gbr_ul}" > "$json_data"
-        else
-            echo "{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi}" > "$json_data"
-        fi
-
-        response=$(nghttp -v \
-            -H ":method: POST" \
-            -H "Content-Type: application/json" \
-            -d "$json_data" \
-            "$SMF_API" 2>&1)
-
-        # 임시 파일 삭제
-        rm -f "$json_data"
-
-        # nghttp 응답에서 HTTP 상태 코드 추출
-        # nghttp는 ":status: 204" 형식으로 출력
-        http_status=$(echo "$response" | grep -E ":status:|< HTTP" | grep -oE "[0-9]{3}" | head -1)
-
-        # 에러 체크
-        if echo "$response" | grep -q "RST_STREAM\|GOAWAY\|INTERNAL_ERROR"; then
-            echo "  ✗ nghttp2 연결 오류 발생"
-            echo "  응답 일부:"
-            echo "$response" | grep -E "RST_STREAM|GOAWAY|INTERNAL_ERROR|error" | head -3
-        elif [ "$http_status" = "204" ] || [ "$http_status" = "200" ]; then
-            echo "  ✓ $ue_name 5QI 변경 성공 (HTTP $http_status)"
-            return 0
-        else
-            echo "  ⚠ nghttp2 응답: HTTP ${http_status:-'알 수 없음'}"
-            echo "  응답 일부:"
-            echo "$response" | grep -E ":status:|HTTP|error|Error" | head -5
-        fi
+    
+    # MBR 값이 제공된 경우 안내 메시지
+    if [ $mbr_dl -gt 0 ] || [ $mbr_ul -gt 0 ]; then
+        echo "  MBR 값 제공: MBR_DL=${mbr_dl} bps ($(echo "scale=2; $mbr_dl/1000000" | bc 2>/dev/null || echo "$(($mbr_dl/1000000))") Mbps), MBR_UL=${mbr_ul} bps ($(echo "scale=2; $mbr_ul/1000000" | bc 2>/dev/null || echo "$(($mbr_ul/1000000))") Mbps)"
     fi
 
-    # nghttp2가 없거나 실패한 경우 Python 사용 (httpx 또는 requests)
+    # Python httpx 사용 시도 (HTTP/2 지원, 가장 안정적) - 우선순위 1
     if command -v python3 >/dev/null 2>&1; then
         echo "  Python httpx 사용 중..."
         python3 << PYTHON_EOF
@@ -134,6 +109,8 @@ qfi = $QFI
 new_5qi = $new_5qi
 gbr_dl = $gbr_dl
 gbr_ul = $gbr_ul
+mbr_dl = $mbr_dl
+mbr_ul = $mbr_ul
 
 try:
     import httpx
@@ -142,6 +119,9 @@ try:
     if gbr_dl > 0 or gbr_ul > 0:
         request_data["gbr_dl"] = gbr_dl
         request_data["gbr_ul"] = gbr_ul
+    if mbr_dl > 0 or mbr_ul > 0:
+        request_data["mbr_dl"] = mbr_dl
+        request_data["mbr_ul"] = mbr_ul
     response = client.post(
         api_url,
         headers={"Content-Type": "application/json"},
@@ -171,21 +151,67 @@ PYTHON_EOF
         fi
     fi
 
-    # 마지막으로 curl 시도 (HTTP/2 업그레이드)
-    echo "  curl 사용 중 (HTTP/2 업그레이드 시도)..."
-    if [ $gbr_dl -gt 0 ] || [ $gbr_ul -gt 0 ]; then
-        response=$(curl --http2 -X POST "$SMF_API" \
+    # nghttp2 클라이언트 사용 시도 (HTTP/2 네이티브 지원) - 우선순위 2
+    if command -v nghttp >/dev/null 2>&1; then
+        echo "  nghttp2 클라이언트 사용 중..."
+        # JSON 데이터를 임시 파일로 생성
+        json_data=$(mktemp)
+        # JSON 객체 생성 (GBR/MBR 값이 제공된 경우에만 포함)
+        json_obj="{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi"
+        if [ $gbr_dl -gt 0 ] || [ $gbr_ul -gt 0 ]; then
+            json_obj="${json_obj}, \"gbr_dl\": $gbr_dl, \"gbr_ul\": $gbr_ul"
+        fi
+        if [ $mbr_dl -gt 0 ] || [ $mbr_ul -gt 0 ]; then
+            json_obj="${json_obj}, \"mbr_dl\": $mbr_dl, \"mbr_ul\": $mbr_ul"
+        fi
+        json_obj="${json_obj}}"
+        echo "$json_obj" > "$json_data"
+
+        response=$(nghttp -v -n \
+            -H ":method: POST" \
+            -H ":path: /nsmf-pdusession/v1/qos-modify" \
             -H "Content-Type: application/json" \
-            -d "{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi, \"gbr_dl\": $gbr_dl, \"gbr_ul\": $gbr_ul}" \
-            -w "\nHTTP_STATUS:%{http_code}" \
-            -s 2>&1)
-    else
-        response=$(curl --http2 -X POST "$SMF_API" \
-            -H "Content-Type: application/json" \
-            -d "{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi}" \
-            -w "\nHTTP_STATUS:%{http_code}" \
-            -s 2>&1)
+            --data="$json_data" \
+            "$SMF_API" 2>&1)
+
+        # 임시 파일 삭제
+        rm -f "$json_data"
+
+        # nghttp 응답에서 HTTP 상태 코드 추출
+        # nghttp는 ":status: 204" 형식으로 출력
+        http_status=$(echo "$response" | grep -E ":status:|< HTTP" | grep -oE "[0-9]{3}" | head -1)
+
+        # 에러 체크
+        if echo "$response" | grep -q "RST_STREAM\|GOAWAY\|INTERNAL_ERROR"; then
+            echo "  ✗ nghttp2 연결 오류 발생"
+            echo "  응답 일부:"
+            echo "$response" | grep -E "RST_STREAM|GOAWAY|INTERNAL_ERROR|error" | head -3
+        elif [ "$http_status" = "204" ] || [ "$http_status" = "200" ]; then
+            echo "  ✓ $ue_name 5QI 변경 성공 (HTTP $http_status)"
+            return 0
+        else
+            echo "  ⚠ nghttp2 응답: HTTP ${http_status:-'알 수 없음'}"
+            echo "  응답 일부:"
+            echo "$response" | grep -E ":status:|HTTP|error|Error" | head -5
+        fi
     fi
+
+    # 마지막으로 curl 시도 (HTTP/2 업그레이드) - 우선순위 3
+    echo "  curl 사용 중 (HTTP/2 업그레이드 시도)..."
+    # JSON 객체 생성
+    json_obj="{\"supi\": \"$supi\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": $new_5qi"
+    if [ $gbr_dl -gt 0 ] || [ $gbr_ul -gt 0 ]; then
+        json_obj="${json_obj}, \"gbr_dl\": $gbr_dl, \"gbr_ul\": $gbr_ul"
+    fi
+    if [ $mbr_dl -gt 0 ] || [ $mbr_ul -gt 0 ]; then
+        json_obj="${json_obj}, \"mbr_dl\": $mbr_dl, \"mbr_ul\": $mbr_ul"
+    fi
+    json_obj="${json_obj}}"
+    response=$(curl --http2 -X POST "$SMF_API" \
+        -H "Content-Type: application/json" \
+        -d "$json_obj" \
+        -w "\nHTTP_STATUS:%{http_code}" \
+        -s 2>&1)
 
     http_status=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2 | tr -d ' ' || echo "")
     connection_success=$(echo "$response" | grep -c "Connected to\|Empty reply" 2>/dev/null || echo "0")
@@ -264,6 +290,19 @@ echo "  PDU Session Identity (PSI): $PSI"
 echo "  QoS Flow Identifier (QFI): $QFI"
 echo ""
 
+# GBR/MBR 설정 출력
+echo "[$(timestamp)] GBR/MBR 설정 (srsRAN 스케줄러용):"
+echo "  non-GBR 5QI (예: 5QI=9):"
+echo "    MBR_DL: ${MBR_NON_GBR_DL} bps ($(echo "scale=2; ${MBR_NON_GBR_DL}/1000000" | bc 2>/dev/null || echo "$((${MBR_NON_GBR_DL}/1000000))") Mbps)"
+echo "    MBR_UL: ${MBR_NON_GBR_UL} bps ($(echo "scale=2; ${MBR_NON_GBR_UL}/1000000" | bc 2>/dev/null || echo "$((${MBR_NON_GBR_UL}/1000000))") Mbps)"
+echo "  delay_critical GBR 5QI (예: 5QI=85):"
+echo "    GBR_DL: ${GBR_DELAY_CRITICAL_DL} bps ($(echo "scale=2; ${GBR_DELAY_CRITICAL_DL}/1000000" | bc 2>/dev/null || echo "$((${GBR_DELAY_CRITICAL_DL}/1000000))") Mbps)"
+echo "    GBR_UL: ${GBR_DELAY_CRITICAL_UL} bps ($(echo "scale=2; ${GBR_DELAY_CRITICAL_UL}/1000000" | bc 2>/dev/null || echo "$((${GBR_DELAY_CRITICAL_UL}/1000000))") Mbps)"
+echo "  참고: 환경변수로 값 변경 가능"
+echo "    MBR_NON_GBR_DL=5000000 MBR_NON_GBR_UL=5000000 \\"
+echo "    GBR_DELAY_CRITICAL_DL=25000000 GBR_DELAY_CRITICAL_UL=25000000 $0"
+echo ""
+
 # 기존 iperf3 프로세스 종료
 echo "[$(timestamp)] 기존 iperf3 프로세스 종료 중..."
 { sudo pkill -x iperf3 2>&1 || true; } > /dev/null 2>&1
@@ -287,12 +326,12 @@ sleep 2
 echo ""
 
 echo "=========================================="
-echo "[$(timestamp)] === UE0만 5QI 동적 변경 테스트 ==="
-echo "  Phase 1: 0-20초 - 모든 UE 기존 5QI (UE0/UE1/UE2 모두 실행)"
+echo "[$(timestamp)] === UE0만 5QI 동적 변경 테스트 (srsRAN 스케줄러용) ==="
+echo "  Phase 1: 0-20초 - 모든 UE 기존 5QI (기본값 5QI=9, UE0/UE1/UE2 모두 실행)"
 echo "  Phase 2: 20-30초 - UE0만 10초 중단 (UE1/UE2는 계속 실행)"
-echo "  Phase 3: 30-50초 - UE0만 5QI=3으로 변경하여 20초 실행 (UE1/UE2는 계속)"
+echo "  Phase 3: 30-50초 - UE0만 5QI=3 (GBR, GBR=${GBR_NORMAL_DL}/${GBR_NORMAL_UL} bps)로 변경하여 20초 실행 (UE1/UE2는 계속)"
 echo "  Phase 4: 50-60초 - UE0만 10초 중단 (UE1/UE2는 계속 실행)"
-echo "  Phase 5: 60-80초 - UE0만 5QI=85로 변경하여 20초 실행 (UE1/UE2는 계속)"
+echo "  Phase 5: 60-80초 - UE0만 5QI=85 (delay_critical GBR, GBR=${GBR_DELAY_CRITICAL_DL}/${GBR_DELAY_CRITICAL_UL} bps)로 변경하여 20초 실행 (UE1/UE2는 계속)"
 echo "=========================================="
 echo ""
 
@@ -347,13 +386,14 @@ printf "\n"
 echo "[$(timestamp)] Phase 2 완료 (30초 경과)"
 echo ""
 
-# Phase 3: UE0만 5QI=3으로 변경하여 20초 실행 (30-50초)
-echo "[$(timestamp)] Phase 3: UE0만 5QI=3으로 변경하여 20초 실행, UE1/UE2는 계속..."
+# Phase 3: UE0만 5QI=3 (GBR)로 변경하여 20초 실행 (30-50초) - GBR 포함
+echo "[$(timestamp)] Phase 3: UE0만 5QI=3 (GBR, GBR=${GBR_NORMAL_DL}/${GBR_NORMAL_UL} bps)로 변경하여 20초 실행, UE1/UE2는 계속..."
 echo "[$(timestamp)] API 호출 전 - SMF 로그 확인 권장: tail -f /var/log/open5gs/smf.log | grep 'Modifying QoS Flow'"
-change_5qi "$UE0_SUPI" 3 "UE0"
+change_5qi "$UE0_SUPI" 3 "UE0" "$GBR_NORMAL_DL" "$GBR_NORMAL_UL" 0 0
 if [ $? -eq 0 ]; then
-    echo "[$(timestamp)] ✓ UE0 5QI 변경 API 호출 성공"
+    echo "[$(timestamp)] ✓ UE0 5QI 변경 API 호출 성공 (5QI=3, GBR_DL=${GBR_NORMAL_DL} bps, GBR_UL=${GBR_NORMAL_UL} bps)"
     echo "[$(timestamp)] gNB에서 QoS Flow Modification 메시지 수신 확인 필요"
+    echo "[$(timestamp)] 자원 할당 변경 확인: srsRAN 스케줄러에서 GBR 값 사용 확인 (기본 5QI=9에서 5QI=3 GBR로 변경)"
 else
     echo "[$(timestamp)] ✗ UE0 5QI 변경 API 호출 실패 - 스크립트 계속 진행"
 fi
@@ -364,7 +404,7 @@ iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 > /tmp/iperf3_dl0_phase3.log 2>&1 &
 DL0_PID=$!
 sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 > /tmp/iperf3_ul0_phase3.log 2>&1 &
 UL0_PID=$!
-echo "  ✓ UE0 트래픽 재시작됨 (5QI=3, DL PID=$DL0_PID, UL PID=$UL0_PID)"
+echo "  ✓ UE0 트래픽 재시작됨 (5QI=3, GBR=${GBR_NORMAL_DL}/${GBR_NORMAL_UL} bps, DL PID=$DL0_PID, UL PID=$UL0_PID)"
 echo "  UE1/UE2는 계속 실행 중..."
 echo ""
 
@@ -393,13 +433,14 @@ printf "\n"
 echo "[$(timestamp)] Phase 4 완료 (60초 경과)"
 echo ""
 
-# Phase 5: UE0만 5QI=85로 변경하여 20초 실행 (60-80초)
-echo "[$(timestamp)] Phase 5: UE0만 5QI=85로 변경하여 20초 실행, UE1/UE2는 계속..."
+# Phase 5: UE0만 5QI=85 (delay_critical GBR)로 변경하여 20초 실행 (60-80초) - GBR 포함
+echo "[$(timestamp)] Phase 5: UE0만 5QI=85 (delay_critical GBR, GBR=${GBR_DELAY_CRITICAL_DL}/${GBR_DELAY_CRITICAL_UL} bps)로 변경하여 20초 실행, UE1/UE2는 계속..."
 echo "[$(timestamp)] API 호출 전 - SMF 로그 확인 권장: tail -f /var/log/open5gs/smf.log | grep 'Modifying QoS Flow'"
-change_5qi "$UE0_SUPI" 85 "UE0"
+change_5qi "$UE0_SUPI" 85 "UE0" "$GBR_DELAY_CRITICAL_DL" "$GBR_DELAY_CRITICAL_UL" 0 0
 if [ $? -eq 0 ]; then
-    echo "[$(timestamp)] ✓ UE0 5QI 변경 API 호출 성공"
+    echo "[$(timestamp)] ✓ UE0 5QI 변경 API 호출 성공 (5QI=85, GBR_DL=${GBR_DELAY_CRITICAL_DL} bps, GBR_UL=${GBR_DELAY_CRITICAL_UL} bps)"
     echo "[$(timestamp)] gNB에서 QoS Flow Modification 메시지 수신 확인 필요"
+    echo "[$(timestamp)] 자원 할당 변경 확인: srsRAN 스케줄러에서 GBR 값 변경 확인 (5QI=3에서 5QI=85로, 일반 GBR에서 delay_critical GBR로)"
 else
     echo "[$(timestamp)] ✗ UE0 5QI 변경 API 호출 실패 - 스크립트 계속 진행"
 fi
@@ -410,7 +451,7 @@ iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 > /tmp/iperf3_dl0_phase5.log 2>&1 &
 DL0_PID=$!
 sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 > /tmp/iperf3_ul0_phase5.log 2>&1 &
 UL0_PID=$!
-echo "  ✓ UE0 트래픽 재시작됨 (5QI=85, DL PID=$DL0_PID, UL PID=$UL0_PID)"
+echo "  ✓ UE0 트래픽 재시작됨 (5QI=85, GBR=${GBR_DELAY_CRITICAL_DL}/${GBR_DELAY_CRITICAL_UL} bps, DL PID=$DL0_PID, UL PID=$UL0_PID)"
 echo "  UE1/UE2는 계속 실행 중..."
 echo ""
 
@@ -441,38 +482,5 @@ echo "=========================================="
 echo "[$(timestamp)] 테스트 완료!"
 echo "=========================================="
 echo ""
-echo "결과 확인:"
-echo "  - iperf3 로그:"
-echo "    tail -20 /tmp/iperf3_dl0.log (Phase 1)"
-echo "    tail -20 /tmp/iperf3_dl0_phase3.log (Phase 3, 5QI=3)"
-echo "    tail -20 /tmp/iperf3_dl0_phase5.log (Phase 5, 5QI=85)"
-echo "    tail -20 /tmp/iperf3_ul0.log (Phase 1)"
-echo "    tail -20 /tmp/iperf3_ul0_phase3.log (Phase 3, 5QI=3)"
-echo "    tail -20 /tmp/iperf3_ul0_phase5.log (Phase 5, 5QI=85)"
-echo ""
-echo "  - SMF 로그 (5QI 변경 확인):"
-echo "    tail -f /var/log/open5gs/smf.log | grep -E 'Modifying QoS Flow|5QI|QFI'"
-echo ""
-echo "  - gNB 로그 (NGAP 메시지 확인):"
-echo "    tail -f /tmp/gnb.log | grep -iE 'qos|modif|pdu.*session.*resource.*modif'"
-echo ""
-echo "  - API 호출 확인:"
-echo "    curl --http2 -X POST $SMF_API -H 'Content-Type: application/json' \\"
-echo "      -d '{\"supi\": \"$UE0_SUPI\", \"psi\": $PSI, \"qfi\": $QFI, \"5qi\": 3}' -v"
-echo ""
-echo "   참고: 5QI만 변경해도 bitrate가 변하지 않을 수 있습니다."
-echo "    - 5QI는 QoS 특성(priority, delay budget)을 정의합니다"
-echo "    - 실제 bitrate는 GBR/MBR 값에 의해 결정됩니다"
-echo "    - 5QI 3, 9, 85의 GBR/MBR이 동일하면 bitrate는 변하지 않습니다"
-echo ""
 
-~
-~
-~
-~
-~
-~
-~
-~
-~
-~
+
