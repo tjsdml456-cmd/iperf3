@@ -2,6 +2,7 @@
 """
 UE별 HOL Delay 정보 추출 스크립트
 로그 파일에서 각 UE의 HOL (Head of Line) delay 정보를 추출합니다.
+타임스탬프는 마이크로초 단위로 추출됩니다.
 """
 
 import re
@@ -24,6 +25,7 @@ def parse_hol_delay_log(log_file: str) -> Dict[int, List[Dict]]:
     
     # [DELAY-WEIGHT] 로그 패턴 (hol_delay_ms가 있는 경우만 파싱)
     # 예: [DELAY-WEIGHT] UE0 LCID4 hol_toa=1234 slot_tx=5678 hol_delay_ms=100 PDB=200ms delay_contrib=0.500 delay_weight=0.500
+    # 타임스탬프: 마이크로초 단위 (예: 2026-02-04T07:00:53.900457)
     hol_delay_pattern = re.compile(
         r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+).*?'
         r'\[DELAY-WEIGHT\]\s+UE(\d+)\s+LCID\d+\s+'
@@ -44,9 +46,17 @@ def parse_hol_delay_log(log_file: str) -> Dict[int, List[Dict]]:
                     except ValueError:
                         timestamp = None
                     
+                    # 마이크로초 추출 (timestamp_str에서 . 이후 부분)
+                    microsecond_str = ""
+                    if '.' in timestamp_str:
+                        microsecond_str = timestamp_str.split('.')[-1]
+                        # 6자리 미만이면 0으로 패딩
+                        microsecond_str = microsecond_str.ljust(6, '0')[:6]
+                    
                     entry = {
                         'timestamp': timestamp,
                         'timestamp_str': timestamp_str,
+                        'timestamp_us': int(microsecond_str) if microsecond_str else 0,
                         'hol_delay_ms': int(match.group(3))
                     }
                     ue_data[ue_idx].append(entry)
@@ -98,7 +108,7 @@ def print_hol_delay_summary(ue_data: Dict[int, List[Dict]]):
         print(f"    - 평균값: {sum(hol_delays) / len(hol_delays):.2f} ms")
 
 def print_hol_delay_detailed(ue_data: Dict[int, List[Dict]], ue_idx: Optional[int] = None, use_global_time: bool = True):
-    """특정 UE의 상세 HOL delay 정보를 출력합니다."""
+    """특정 UE의 상세 HOL delay 정보를 출력합니다. (마이크로초 단위 타임스탬프)"""
     if ue_idx is not None:
         ues_to_print = [ue_idx] if ue_idx in ue_data else []
     else:
@@ -113,29 +123,29 @@ def print_hol_delay_detailed(ue_data: Dict[int, List[Dict]], ue_idx: Optional[in
         
         print(f"\n{'=' * 80}")
         print(f"UE{ue} HOL Delay (큐잉 딜레이) 상세 정보")
-        print(f"전체 {len(entries_sorted)}개")
+        print(f"전체 {len(entries_sorted)}개 (타임스탬프: 마이크로초 단위)")
         print(f"{'=' * 80}")
-        print(f"{'시스템 시간':<30} {'HOL Delay (ms)':<20}")
+        print(f"{'시스템 시간 (시:분:초.마이크로초)':<45} {'HOL Delay (ms)':<20}")
         print("-" * 80)
         
         for entry in entries_sorted:
             if entry['timestamp'] is not None:
-                # 시스템 시간 표시 (시:분:초.밀리초)
-                time_str = entry['timestamp'].strftime("%H:%M:%S.%f")[:-3]  # 마이크로초를 밀리초로
+                # 마이크로초 단위로 표시 (%f는 마이크로초 6자리)
+                time_str = entry['timestamp'].strftime("%H:%M:%S.%f")
             else:
                 time_str = "N/A"
             
             hol_delay_str = f"{entry['hol_delay_ms']}"
             
-            print(f"{time_str:<30} {hol_delay_str:<20}")
+            print(f"{time_str:<45} {hol_delay_str:<20}")
 
 def export_to_csv(ue_data: Dict[int, List[Dict]], output_file: str):
-    """UE별 HOL delay 데이터를 CSV 파일로 저장합니다."""
+    """UE별 HOL delay 데이터를 CSV 파일로 저장합니다. (마이크로초 단위 타임스탬프)"""
     import csv
     
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(['UE', '시스템 시간', 'HOL Delay (ms)'])
+        writer.writerow(['UE', '시스템 시간 (마이크로초)', 'HOL Delay (ms)'])
         
         for ue_idx in sorted(ue_data.keys()):
             entries = ue_data[ue_idx]
@@ -143,7 +153,7 @@ def export_to_csv(ue_data: Dict[int, List[Dict]], output_file: str):
             
             for entry in entries_sorted:
                 if entry['timestamp'] is not None:
-                    # 시스템 시간을 ISO 형식으로 저장
+                    # ISO 형식 (마이크로초 포함, 예: 2026-02-04T07:00:53.900457)
                     time_str = entry['timestamp'].isoformat()
                 else:
                     time_str = ""
@@ -164,10 +174,11 @@ def main():
         print(f"\nArguments:")
         print(f"  log_file       로그 파일 경로 (기본값: {default_log_file})")
         print("\nOptions:")
-        print("  -u <ue_idx>    특정 UE만 출력 (예: -u 0)")
+        print("  -u <ue_idx>    특정 UE만 출력 (기본값: 0, 예: -u 1)")
         print("  -c <csv_file>  CSV 파일로 저장")
         print("  -g, --global   모든 UE를 공통 기준 시간으로 정렬 (기본값)")
         print("  -h, --help     도움말 출력")
+        print("\n타임스탬프는 마이크로초 단위로 추출/출력됩니다.")
         sys.exit(0)
     
     if len(sys.argv) >= 2 and not sys.argv[1].startswith('-'):
@@ -177,7 +188,7 @@ def main():
         log_file = default_log_file
         opt_start = 1
     
-    ue_idx = None
+    ue_idx = 0  # 기본값: UE0만 추출
     csv_file = None
     use_global_time = True
     
@@ -196,7 +207,7 @@ def main():
             print(f"Warning: 알 수 없는 옵션 '{sys.argv[i]}' (무시됨)")
             i += 1
     
-    print(f"로그 파일 파싱 중: {log_file}")
+    print(f"로그 파일 파싱 중: {log_file} (타임스탬프: 마이크로초 단위)")
     ue_data = parse_hol_delay_log(log_file)
     
     if not ue_data:
@@ -211,8 +222,9 @@ def main():
     
     # CSV 저장
     if csv_file:
-        export_to_csv(ue_data, csv_file)
+        # 지정된 UE만 CSV 저장
+        to_export = {ue_idx: ue_data[ue_idx]} if ue_idx in ue_data else ue_data
+        export_to_csv(to_export, csv_file)
 
 if __name__ == '__main__':
     main()
-
