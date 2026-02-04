@@ -2,12 +2,13 @@
 """
 UE별 Throughput 정보 추출 스크립트
 로그 파일에서 각 UE의 throughput 정보를 추출합니다.
+타임스탬프는 마이크로초 단위로 추출됩니다.
 """
 
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
 def parse_throughput_log(log_file: str) -> Dict[int, List[Dict]]:
@@ -97,7 +98,7 @@ def parse_throughput_log(log_file: str) -> Dict[int, List[Dict]]:
     
     return ue_data
 
-def get_global_first_timestamp(ue_data: Dict[int, List[Dict]]) -> datetime:
+def get_global_first_timestamp(ue_data: Dict[int, List[Dict]]) -> Optional[datetime]:
     """모든 UE의 레코드 중 가장 이른 타임스탬프를 찾습니다."""
     global_first = None
     for ue_idx, entries in ue_data.items():
@@ -144,8 +145,8 @@ def print_throughput_summary(ue_data: Dict[int, List[Dict]]):
             print(f"      - 평균값: {sum(total_throughputs) / len(total_throughputs):.2f} Mbps")
             print(f"    - 레코드 수: {len(calculated_entries)}")
 
-def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None, use_global_time: bool = True):
-    """특정 UE의 상세 throughput 정보를 출력합니다."""
+def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: Optional[int] = None, use_global_time: bool = True):
+    """특정 UE의 상세 throughput 정보를 출력합니다. (마이크로초 단위 타임스탬프)"""
     if ue_idx is not None:
         ues_to_print = [ue_idx] if ue_idx in ue_data else []
     else:
@@ -157,7 +158,7 @@ def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None
         global_first_timestamp = get_global_first_timestamp(ue_data)
         if global_first_timestamp:
             print(f"\n{'=' * 100}")
-            print(f"[공통 기준 시간] {global_first_timestamp.isoformat()}")
+            print(f"[공통 기준 시간] {global_first_timestamp.isoformat()} (마이크로초 단위)")
             print(f"{'=' * 100}")
     
     for ue in ues_to_print:
@@ -191,10 +192,10 @@ def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None
             continue
         
         print(f"\n{'=' * 100}")
-        print(f"UE{ue} Throughput 상세 정보 (시스템 계산값, 동적 period)")
+        print(f"UE{ue} Throughput 상세 정보 (시스템 계산값, 동적 period, 타임스탬프: 마이크로초 단위)")
         print(f"전체 {len(calculated_entries)}개 | {time_label}: {first_timestamp.isoformat()}")
         print(f"{'=' * 100}")
-        print(f"{'상대시간(초)':<15} {'절대시간':<20} {'DL (Mbps)':<12} {'UL (Mbps)':<12} {'Total (Mbps)':<15} {'Period (ms)':<12} {'DL Bytes':<12} {'HARQ OK':<10}")
+        print(f"{'상대시간(초.마이크로초)':<25} {'절대시간(시:분:초.마이크로초)':<30} {'DL (Mbps)':<12} {'UL (Mbps)':<12} {'Total (Mbps)':<15} {'Period (ms)':<12} {'DL Bytes':<12} {'HARQ OK':<10}")
         print("-" * 100)
         
         # 중복 제거: 같은 타임스탬프를 가진 항목은 하나만 출력
@@ -202,8 +203,8 @@ def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None
         unique_entries = []
         for entry in calculated_entries:
             if entry['timestamp'] is not None:
-                # 타임스탬프를 초 단위로 반올림하여 중복 체크
-                ts_key = entry['timestamp'].replace(microsecond=0)
+                # 타임스탬프를 마이크로초 단위로 중복 체크
+                ts_key = entry['timestamp'].isoformat()
                 if ts_key not in seen_timestamps:
                     seen_timestamps.add(ts_key)
                     unique_entries.append(entry)
@@ -212,21 +213,21 @@ def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: int = None
         
         for entry in unique_entries:
             if entry['timestamp'] is not None:
-                # 상대 시간 계산 (초 단위)
+                # 상대 시간 계산 (초.마이크로초)
                 time_diff = entry['timestamp'] - first_timestamp
                 rel_time_sec = time_diff.total_seconds()
                 
-                # 절대 시간 표시 (시:분:초.밀리초)
-                abs_time_str = entry['timestamp'].strftime("%H:%M:%S.%f")[:-3]  # 마이크로초를 밀리초로
-                rel_time_str = f"{rel_time_sec:.2f}"
+                # 절대 시간 표시 (시:분:초.마이크로초)
+                abs_time_str = entry['timestamp'].strftime("%H:%M:%S.%f")
+                rel_time_str = f"{rel_time_sec:.6f}"
             else:
                 abs_time_str = "N/A"
                 rel_time_str = "N/A"
             
             ul_display = f"{entry['ul_brate_mbps']:.2f}" if entry['ul_brate_mbps'] > 0 else "N/A"
             
-            print(f"{rel_time_str:<15} "
-                  f"{abs_time_str:<20} "
+            print(f"{rel_time_str:<25} "
+                  f"{abs_time_str:<30} "
                   f"{entry['dl_brate_mbps']:<12.2f} "
                   f"{ul_display:<12} "
                   f"{entry['total_brate_mbps']:<15.2f} "
@@ -245,6 +246,7 @@ def main():
         print("  -u <ue_idx>    특정 UE만 출력 (예: -u 0)")
         print("  -g, --global   모든 UE를 공통 기준 시간으로 정렬 (기본값)")
         print("  -h, --help     도움말 출력")
+        print("\n타임스탬프는 마이크로초 단위로 추출/출력됩니다.")
         sys.exit(0)
     
     if len(sys.argv) >= 2 and not sys.argv[1].startswith('-'):
@@ -269,7 +271,7 @@ def main():
             print(f"Warning: 알 수 없는 옵션 '{sys.argv[i]}' (무시됨)")
             i += 1
     
-    print(f"로그 파일 파싱 중: {log_file}")
+    print(f"로그 파일 파싱 중: {log_file} (타임스탬프: 마이크로초 단위)")
     ue_data = parse_throughput_log(log_file)
     
     if not ue_data:
@@ -294,4 +296,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
