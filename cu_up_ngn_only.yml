@@ -1,0 +1,9 @@
+   # gNB 실행 시 두 번째 config로 사용: N3만 실제 IP로 바인드 (iptables DSCP용)
+# 사용: ./gnb -c gnb_zmq.yaml -c configs/cu_up_ngu_only.yml
+# 주의: e1ap/f1u는 gNB 내장 CU-UP 스키마에 없어서, 이 파일에는 ngu만 넣음
+
+cu_up:
+  ngu:
+    socket:
+      -
+        bind_addr: 10.53.1.3
