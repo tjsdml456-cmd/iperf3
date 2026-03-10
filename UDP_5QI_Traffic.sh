@@ -42,10 +42,14 @@ timestamp_us() {
 # 로그 파일 경로
 LOG_FILE="/tmp/iperf3_dynamic_5qi_test.log"
 
+# 트래픽 시작 기준 시각(ns 단위, 5QI 변경 상대 시각 계산용)
+TRAFFIC_START_EPOCH_NS=""
+
 # 이벤트 로그 함수
 log_event() {
     local msg="$1"
-    local ts=$(timestamp_us)
+    local ts
+    ts=$(timestamp_us)
     echo "[$ts] $msg" | tee -a "$LOG_FILE"
 }
 
@@ -297,19 +301,23 @@ echo "=========================================="
 echo ""
 
 # DL/UL 트래픽 시작 (80초, UE0만 동적 5QI 변경)
-echo "[$(timestamp)] === DL/UL 트래픽 시작 (80초) ==="
-echo "  UE0 UDP Phase1 ${UE0_UDP_RATE_P1}, UE1/2 TCP (기존 5QI 유지)"
-log_event "트래픽 시작: UE0 동적 5QI, UE1/2 기존 5QI 유지"
+echo "[$(timestamp)] === DL/UL 트래픽 시작 (80초 연속) ==="
+echo "  UE0 UDP ${UE0_UDP_RATE_P1} (80초 연속), UE1/2 TCP (기존 5QI 유지)"
+log_event "트래픽 시작: UE0 연속 UDP 트래픽 + 동적 5QI, UE1/2 기존 5QI 유지"
 
-# UE0 DL: UDP Phase1 20초
-iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_dl0.log 2>&1 &
+# 트래픽 시작 기준 시각 저장 (상대 시간 계산용, ns 단위)
+TRAFFIC_START_EPOCH_NS=$(date +%s%N)
+log_event "트래픽 기준 시각(EPOCH_NS) 설정: ${TRAFFIC_START_EPOCH_NS}"
+
+# UE0 DL: UDP 80초 연속 (5QI만 중간에 변경)
+iperf3 -c 10.45.0.2 -t 80 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_dl0.log 2>&1 &
 DL0_PID=$!
-log_event "UE0 DL 시작 (PID=$DL0_PID): UDP ${UE0_UDP_RATE_P1}"
+log_event "UE0 DL 시작 (PID=$DL0_PID): UDP ${UE0_UDP_RATE_P1}, 80초 연속"
 
-# UE0 UL: UDP Phase1 20초
-sudo ip netns exec ue1 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 20 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_ul0.log 2>&1 &
+# UE0 UL: UDP 80초 연속 (5QI만 중간에 변경)
+sudo ip netns exec ue1 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 80 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_ul0.log 2>&1 &
 UL0_PID=$!
-log_event "UE0 UL 시작 (PID=$UL0_PID): UDP ${UE0_UDP_RATE_P1}"
+log_event "UE0 UL 시작 (PID=$UL0_PID): UDP ${UE0_UDP_RATE_P1}, 80초 연속"
 
 # UE1 DL: TCP 80초, 기존 5QI 유지
 iperf3 -c 10.45.0.3 -t 80 -p 6501 -i 1 > /tmp/iperf3_dl1.log 2>&1 &
@@ -342,15 +350,21 @@ echo ""
 
 # Phase 1: UE0 5QI=9 (0-20초)
 echo "[$(timestamp)] Phase 1: UE0 5QI=9 설정 (20초)..."
-log_event "Phase 1: UE0 5QI=9 변경 시작"
+PHASE_EPOCH_NS=$(date +%s%N)
+REL_SEC=""
+if [ -n "$TRAFFIC_START_EPOCH_NS" ]; then
+    local diff_ns=$((PHASE_EPOCH_NS - TRAFFIC_START_EPOCH_NS))
+    REL_SEC=$(printf "%.4f" "$(echo "$diff_ns / 1000000000" | bc -l)")
+fi
+log_event "Phase 1: UE0 5QI=9 변경 시작 (트래픽 시작 후 ${REL_SEC}초)"
 change_5qi "$UE0_SUPI" 9 "UE0" 0 0 0 0
 CHANGE_RESULT=$?
 if [ $CHANGE_RESULT -eq 0 ]; then
     echo "[$(timestamp)] ✓ UE0 5QI=9 설정 성공"
-    log_event "UE0 5QI 변경 성공 (5QI=9) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 성공 (5QI=9) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 else
     echo "[$(timestamp)] ✗ UE0 5QI=9 설정 실패 - 스크립트 계속 진행"
-    log_event "UE0 5QI 변경 실패 (5QI=9) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 실패 (5QI=9) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 fi
 echo ""
 
@@ -365,22 +379,27 @@ echo ""
 
 # Phase 2: UE0 5QI=66 (20-40초), UE0 UDP 세그먼트 2 (20Mbps)
 echo "[$(timestamp)] Phase 2: UE0 5QI=66 (GBR 20Mbps)로 변경, UE0 UDP ${UE0_UDP_RATE_P2} (20초)..."
-log_event "Phase 2: UE0 5QI=66 변경 시작"
+PHASE_EPOCH_NS=$(date +%s%N)
+REL_SEC=""
+if [ -n "$TRAFFIC_START_EPOCH_NS" ]; then
+    local diff_ns=$((PHASE_EPOCH_NS - TRAFFIC_START_EPOCH_NS))
+    REL_SEC=$(printf "%.4f" "$(echo "$diff_ns / 1000000000" | bc -l)")
+fi
+log_event "Phase 2: UE0 5QI=66 변경 시작 (트래픽 시작 후 ${REL_SEC}초)"
 change_5qi "$UE0_SUPI" 66 "UE0" "$GBR_NORMAL_DL" "$GBR_NORMAL_UL" 0 0
 CHANGE_RESULT=$?
 if [ $CHANGE_RESULT -eq 0 ]; then
     echo "[$(timestamp)] ✓ UE0 5QI=66 변경 성공 (GBR 20Mbps)"
-    log_event "UE0 5QI 변경 성공 (5QI=66) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 성공 (5QI=66) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 else
     echo "[$(timestamp)] ✗ UE0 5QI=66 변경 실패 - 스크립트 계속 진행"
-    log_event "UE0 5QI 변경 실패 (5QI=66) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 실패 (5QI=66) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 fi
 # UE0 UDP Phase2 20초
 iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P2} >> /tmp/iperf3_dl0.log 2>&1 &
 DL0_PID=$!
 sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P2} >> /tmp/iperf3_ul0.log 2>&1 &
 UL0_PID=$!
-echo "  ✓ UE0 UDP Phase2 (${UE0_UDP_RATE_P2}) 시작"
 echo ""
 
 for i in {1..20}; do
@@ -394,22 +413,22 @@ echo ""
 
 # Phase 3: UE0 5QI=80 (40-60초, non-GBR), UE0 UDP 세그먼트 3 (1Mbps)
 echo "[$(timestamp)] Phase 3: UE0 5QI=80 (non-GBR)로 변경, UE0 UDP ${UE0_UDP_RATE_P3} (20초)..."
-log_event "Phase 3: UE0 5QI=80 (non-GBR) 변경 시작"
+PHASE_EPOCH_NS=$(date +%s%N)
+REL_SEC=""
+if [ -n "$TRAFFIC_START_EPOCH_NS" ]; then
+    local diff_ns=$((PHASE_EPOCH_NS - TRAFFIC_START_EPOCH_NS))
+    REL_SEC=$(printf "%.4f" "$(echo "$diff_ns / 1000000000" | bc -l)")
+fi
+log_event "Phase 3: UE0 5QI=80 (non-GBR) 변경 시작 (트래픽 시작 후 ${REL_SEC}초)"
 change_5qi "$UE0_SUPI" 80 "UE0" 0 0 0 0
 CHANGE_RESULT=$?
 if [ $CHANGE_RESULT -eq 0 ]; then
     echo "[$(timestamp)] ✓ UE0 5QI=80 변경 성공 (non-GBR, 1Mbps)"
-    log_event "UE0 5QI 변경 성공 (5QI=80, non-GBR) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 성공 (5QI=80, non-GBR) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 else
     echo "[$(timestamp)] ✗ UE0 5QI=80 변경 실패 - 스크립트 계속 진행"
-    log_event "UE0 5QI 변경 실패 (5QI=80) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 실패 (5QI=80) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 fi
-# UE0 UDP Phase3 20초
-iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P3} >> /tmp/iperf3_dl0.log 2>&1 &
-DL0_PID=$!
-sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P3} >> /tmp/iperf3_ul0.log 2>&1 &
-UL0_PID=$!
-echo "  ✓ UE0 UDP Phase3 (${UE0_UDP_RATE_P3}) 시작"
 echo ""
 
 for i in {1..20}; do
@@ -423,22 +442,22 @@ echo ""
 
 # Phase 4: UE0 5QI=84 (60-80초, delay_critical GBR), UE0 UDP 세그먼트 4 (15Mbps)
 echo "[$(timestamp)] Phase 4: UE0 5QI=84 (delay_critical GBR 15Mbps)로 변경, UE0 UDP ${UE0_UDP_RATE_P4} (20초)..."
-log_event "Phase 4: UE0 5QI=84 (delay_critical GBR) 변경 시작"
+PHASE_EPOCH_NS=$(date +%s%N)
+REL_SEC=""
+if [ -n "$TRAFFIC_START_EPOCH_NS" ]; then
+    local diff_ns=$((PHASE_EPOCH_NS - TRAFFIC_START_EPOCH_NS))
+    REL_SEC=$(printf "%.4f" "$(echo "$diff_ns / 1000000000" | bc -l)")
+fi
+log_event "Phase 4: UE0 5QI=84 (delay_critical GBR) 변경 시작 (트래픽 시작 후 ${REL_SEC}초)"
 change_5qi "$UE0_SUPI" 84 "UE0" "$GBR_DELAY_CRITICAL_DL" "$GBR_DELAY_CRITICAL_UL" 0 0
 CHANGE_RESULT=$?
 if [ $CHANGE_RESULT -eq 0 ]; then
     echo "[$(timestamp)] ✓ UE0 5QI=84 변경 성공 (delay_critical GBR 15Mbps)"
-    log_event "UE0 5QI 변경 성공 (5QI=84, delay_critical GBR) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 성공 (5QI=84, delay_critical GBR) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 else
     echo "[$(timestamp)] ✗ UE0 5QI=84 변경 실패 - 스크립트 계속 진행"
-    log_event "UE0 5QI 변경 실패 (5QI=84) - 시점: $(timestamp_us)"
+    log_event "UE0 5QI 변경 실패 (5QI=84) - 시점: $(timestamp_us), 트래픽 시작 후 ${REL_SEC}초"
 fi
-# UE0 UDP Phase4 20초
-iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P4} >> /tmp/iperf3_dl0.log 2>&1 &
-DL0_PID=$!
-sudo ip netns exec ue1 iperf3 -c ${EXTERNAL_SERVER_IP} -t 20 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P4} >> /tmp/iperf3_ul0.log 2>&1 &
-UL0_PID=$!
-echo "  ✓ UE0 UDP Phase4 (${UE0_UDP_RATE_P4}) 시작"
 echo ""
 
 for i in {1..20}; do
