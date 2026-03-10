@@ -1,6 +1,6 @@
 #!/bin/bash
 # iperf3 Dynamic 5QI Test Script
-# UE0만 동적 5QI 변경: 10초 5QI=9 → 20초 5QI=66(GBR) → 20초 5QI=80(non-GBR) → 20초 5QI=84(delay_critical GBR) (총 70초)
+# UE0만 동적 5QI 변경: 20초 5QI=9 → 20초 5QI=66(GBR) → 20초 5QI=80(non-GBR) → 20초 5QI=84(delay_critical GBR) (총 80초)
 
 # set -e 제거 (에러가 발생해도 계속 진행)
 
@@ -236,7 +236,7 @@ PYTHON_EOF
 # 로그 파일 초기화
 echo "==========================================" > "$LOG_FILE"
 echo "  iperf3 Dynamic 5QI 테스트 로그" >> "$LOG_FILE"
-echo "  UE0 UDP 20/20/1/15Mbps, UE1/2 TCP, GBR 20Mbps delay_critical 15Mbps (70초)" >> "$LOG_FILE"
+echo "  UE0 UDP 20/20/1/15Mbps, UE1/2 TCP, GBR 20Mbps delay_critical 15Mbps (80초)" >> "$LOG_FILE"
 echo "  UE1/2: 기존 5QI 유지" >> "$LOG_FILE"
 echo "  시작 시간: $(timestamp_us)" >> "$LOG_FILE"
 echo "==========================================" >> "$LOG_FILE"
@@ -250,7 +250,7 @@ echo ""
 echo "[$(timestamp)] 5QI 시나리오:"
 echo "  - UE0 (ue1): UDP, 5QI 9/66/80/84, 비트레이트 20/20/1/15 Mbps"
 echo "  - UE1 (ue2)/UE2 (ue3): TCP, 기존 5QI 유지"
-echo "  - GBR 20Mbps (66), delay_critical GBR 15Mbps (84), 테스트 70초"
+echo "  - GBR 20Mbps (66), delay_critical GBR 15Mbps (84), 테스트 80초"
 log_event "테스트 시작 (UE0 동적 5QI 변경)"
 echo ""
 
@@ -288,46 +288,46 @@ echo ""
 
 echo "=========================================="
 echo "[$(timestamp)] === 5QI 시나리오: UE0만 동적 변경 (9→66→80→84) ==="
-echo "  Phase 1: 0-10초  - UE0 5QI=9"
-echo "  Phase 2: 10-30초 - UE0 5QI=66 (GBR, 20Mbps)"
-echo "  Phase 3: 30-50초 - UE0 5QI=80 (non-GBR, 1Mbps)"
-echo "  Phase 4: 50-70초 - UE0 5QI=84 (delay_critical GBR, 15Mbps)"
-echo "  UE0=UDP(구간별 비트레이트), UE1/2=TCP, 테스트 시간: 70초"
+echo "  Phase 1: 0-20초  - UE0 5QI=9"
+echo "  Phase 2: 20-40초 - UE0 5QI=66 (GBR, 20Mbps)"
+echo "  Phase 3: 40-60초 - UE0 5QI=80 (non-GBR, 1Mbps)"
+echo "  Phase 4: 60-80초 - UE0 5QI=84 (delay_critical GBR, 15Mbps)"
+echo "  UE0=UDP(구간별 비트레이트), UE1/2=TCP, 테스트 시간: 80초"
 echo "=========================================="
 echo ""
 
-# DL/UL 트래픽 시작 (70초, UE0만 동적 5QI 변경)
-echo "[$(timestamp)] === DL/UL 트래픽 시작 (70초) ==="
+# DL/UL 트래픽 시작 (80초, UE0만 동적 5QI 변경)
+echo "[$(timestamp)] === DL/UL 트래픽 시작 (80초) ==="
 echo "  UE0 UDP Phase1 ${UE0_UDP_RATE_P1}, UE1/2 TCP (기존 5QI 유지)"
 log_event "트래픽 시작: UE0 동적 5QI, UE1/2 기존 5QI 유지"
 
-# UE0 DL: UDP Phase1 10초
-iperf3 -c 10.45.0.2 -t 10 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_dl0.log 2>&1 &
+# UE0 DL: UDP Phase1 20초
+iperf3 -c 10.45.0.2 -t 20 -p 6500 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_dl0.log 2>&1 &
 DL0_PID=$!
 log_event "UE0 DL 시작 (PID=$DL0_PID): UDP ${UE0_UDP_RATE_P1}"
 
-# UE0 UL: UDP Phase1 10초
-sudo ip netns exec ue1 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 10 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_ul0.log 2>&1 &
+# UE0 UL: UDP Phase1 20초
+sudo ip netns exec ue1 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 20 -p 6600 -i 1 -u -b ${UE0_UDP_RATE_P1} > /tmp/iperf3_ul0.log 2>&1 &
 UL0_PID=$!
 log_event "UE0 UL 시작 (PID=$UL0_PID): UDP ${UE0_UDP_RATE_P1}"
 
-# UE1 DL: TCP 70초, 기존 5QI 유지
-iperf3 -c 10.45.0.3 -t 70 -p 6501 -i 1 > /tmp/iperf3_dl1.log 2>&1 &
+# UE1 DL: TCP 80초, 기존 5QI 유지
+iperf3 -c 10.45.0.3 -t 80 -p 6501 -i 1 > /tmp/iperf3_dl1.log 2>&1 &
 DL1_PID=$!
 log_event "UE1 DL 시작 (PID=$DL1_PID): 기존 5QI 유지"
 
-# UE1 UL: TCP 70초, 기존 5QI 유지
-sudo ip netns exec ue2 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 70 -p 6601 -i 1 > /tmp/iperf3_ul1.log 2>&1 &
+# UE1 UL: TCP 80초, 기존 5QI 유지
+sudo ip netns exec ue2 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 80 -p 6601 -i 1 > /tmp/iperf3_ul1.log 2>&1 &
 UL1_PID=$!
 log_event "UE1 UL 시작 (PID=$UL1_PID): 기존 5QI 유지"
 
-# UE2 DL: TCP 70초, 기존 5QI 유지
-iperf3 -c 10.45.0.4 -t 70 -p 6502 -i 1 > /tmp/iperf3_dl2.log 2>&1 &
+# UE2 DL: TCP 80초, 기존 5QI 유지
+iperf3 -c 10.45.0.4 -t 80 -p 6502 -i 1 > /tmp/iperf3_dl2.log 2>&1 &
 DL2_PID=$!
 log_event "UE2 DL 시작 (PID=$DL2_PID): 기존 5QI 유지"
 
-# UE2 UL: TCP 70초, 기존 5QI 유지
-sudo ip netns exec ue3 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 70 -p 6602 -i 1 > /tmp/iperf3_ul2.log 2>&1 &
+# UE2 UL: TCP 80초, 기존 5QI 유지
+sudo ip netns exec ue3 iperf3 -c "${EXTERNAL_SERVER_IP}" -t 80 -p 6602 -i 1 > /tmp/iperf3_ul2.log 2>&1 &
 UL2_PID=$!
 log_event "UE2 UL 시작 (PID=$UL2_PID): 기존 5QI 유지"
 
@@ -340,8 +340,8 @@ echo "    UE0: UDP 구간별 20/20/1/15Mbps, 5QI 9→66→80→84"
 echo "    UE1/2: TCP 70초, 기존 5QI 유지"
 echo ""
 
-# Phase 1: UE0 5QI=9 (0-10초)
-echo "[$(timestamp)] Phase 1: UE0 5QI=9 설정 (10초)..."
+# Phase 1: UE0 5QI=9 (0-20초)
+echo "[$(timestamp)] Phase 1: UE0 5QI=9 설정 (20초)..."
 log_event "Phase 1: UE0 5QI=9 변경 시작"
 change_5qi "$UE0_SUPI" 9 "UE0" 0 0 0 0
 CHANGE_RESULT=$?
@@ -354,16 +354,16 @@ else
 fi
 echo ""
 
-for i in {1..10}; do
-    show_progress 1 $i 10
+for i in {1..20}; do
+    show_progress 1 $i 20
     sleep 1
 done
 printf "\n"
-echo "[$(timestamp)] Phase 1 완료 (10초 경과)"
-log_event "Phase 1 완료 (10초 경과)"
+echo "[$(timestamp)] Phase 1 완료 (20초 경과)"
+log_event "Phase 1 완료 (20초 경과)"
 echo ""
 
-# Phase 2: UE0 5QI=66 (10-30초), UE0 UDP 세그먼트 2 (20Mbps)
+# Phase 2: UE0 5QI=66 (20-40초), UE0 UDP 세그먼트 2 (20Mbps)
 echo "[$(timestamp)] Phase 2: UE0 5QI=66 (GBR 20Mbps)로 변경, UE0 UDP ${UE0_UDP_RATE_P2} (20초)..."
 log_event "Phase 2: UE0 5QI=66 변경 시작"
 change_5qi "$UE0_SUPI" 66 "UE0" "$GBR_NORMAL_DL" "$GBR_NORMAL_UL" 0 0
@@ -388,11 +388,11 @@ for i in {1..20}; do
     sleep 1
 done
 printf "\n"
-echo "[$(timestamp)] Phase 2 완료 (30초 경과)"
-log_event "Phase 2 완료 (30초 경과)"
+echo "[$(timestamp)] Phase 2 완료 (40초 경과)"
+log_event "Phase 2 완료 (40초 경과)"
 echo ""
 
-# Phase 3: UE0 5QI=80 (30-50초, non-GBR), UE0 UDP 세그먼트 3 (1Mbps)
+# Phase 3: UE0 5QI=80 (40-60초, non-GBR), UE0 UDP 세그먼트 3 (1Mbps)
 echo "[$(timestamp)] Phase 3: UE0 5QI=80 (non-GBR)로 변경, UE0 UDP ${UE0_UDP_RATE_P3} (20초)..."
 log_event "Phase 3: UE0 5QI=80 (non-GBR) 변경 시작"
 change_5qi "$UE0_SUPI" 80 "UE0" 0 0 0 0
@@ -417,11 +417,11 @@ for i in {1..20}; do
     sleep 1
 done
 printf "\n"
-echo "[$(timestamp)] Phase 3 완료 (50초 경과)"
-log_event "Phase 3 완료 (50초 경과)"
+echo "[$(timestamp)] Phase 3 완료 (60초 경과)"
+log_event "Phase 3 완료 (60초 경과)"
 echo ""
 
-# Phase 4: UE0 5QI=84 (50-70초, delay_critical GBR), UE0 UDP 세그먼트 4 (15Mbps)
+# Phase 4: UE0 5QI=84 (60-80초, delay_critical GBR), UE0 UDP 세그먼트 4 (15Mbps)
 echo "[$(timestamp)] Phase 4: UE0 5QI=84 (delay_critical GBR 15Mbps)로 변경, UE0 UDP ${UE0_UDP_RATE_P4} (20초)..."
 log_event "Phase 4: UE0 5QI=84 (delay_critical GBR) 변경 시작"
 change_5qi "$UE0_SUPI" 84 "UE0" "$GBR_DELAY_CRITICAL_DL" "$GBR_DELAY_CRITICAL_UL" 0 0
@@ -446,8 +446,8 @@ for i in {1..20}; do
     sleep 1
 done
 printf "\n"
-echo "[$(timestamp)] 테스트 완료 (70초 경과)"
-log_event "테스트 완료 (70초 경과)"
+echo "[$(timestamp)] 테스트 완료 (80초 경과)"
+log_event "테스트 완료 (80초 경과)"
 echo ""
 
 # 정리
