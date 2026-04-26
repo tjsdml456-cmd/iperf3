@@ -1,40 +1,47 @@
 #!/bin/bash
-# iperf3 DSCP 시나리오 (DL 전용) — 단일 UDP 세션, 0.2초마다 DSCP 전환 × 12회
+# iperf3 DSCP 시나리오 (DL 전용) — 단일 UDP 세션, 0.2초마다 DSCP 전환
 #
-# 패턴: 0→44→24→15 를 3사이클 (마지막 전환 후 DSCP=0), 시각 0.2,0.4,…,2.4초
-# UE1: UDP + --dscp-change (커스텀 iperf_QoS-1: 최대 12전환)
+# 패턴: 0->44->24->15->0 를 100주기 반복 (총 400 transitions)
+# 시각: 0.2, 0.4, ..., 80.0초
+#
+# UE1: UDP + --dscp-change (커스텀 iperf_QoS-1: 최대 400전환)
 # UE2/UE3: TCP -S 0 고정 (DL만)
 #
-# iperf3 -t 는 정수 초만 허용 → 기본 TOTAL_DUR=4 (2.4초 이후 여유)
+# iperf3 -t 는 정수 초만 허용 -> 기본 TOTAL_DUR=82 (80초 이후 여유)
 
+set -euo pipefail
 export LC_ALL=C
 
 UE1_IP=${UE1_IP:-10.45.0.2}
 UE2_IP=${UE2_IP:-10.45.0.3}
 UE3_IP=${UE3_IP:-10.45.0.4}
 
-# 전환 간격(초). 기본 0.2
+# 전환 간격(초)
 STEP_SEC=${STEP_SEC:-0.2}
 
-# 전환 횟수 (기본 12). 값 개수 = TRANSITIONS + 1
-TRANSITIONS=${TRANSITIONS:-12}
+# 주기 수 / 전환 수
+CYCLES=${CYCLES:-100}
+TRANS_PER_CYCLE=4
+TRANSITIONS=${TRANSITIONS:-$((CYCLES * TRANS_PER_CYCLE))}
+MAX_TRANSITIONS=400
 
-# 테스트 길이(정수 초). 마지막 전환 시각 = TRANSITIONS * STEP_SEC 보다 커야 함.
-TOTAL_DUR=${TOTAL_DUR:-4}
+# 테스트 길이(정수 초): 마지막 전환 시각보다 커야 함.
+TOTAL_DUR=${TOTAL_DUR:-82}
 
 USE_RATE_CHANGE=${USE_RATE_CHANGE:-0}
-UE1_FIXED_BITRATE=${UE1_FIXED_BITRATE:-10M}
-# USE_RATE_CHANGE=1 일 때만 사용 (전환 시각은 DSCP와 동일)
+UE1_FIXED_BITRATE=${UE1_FIXED_BITRATE:-20M}
 RATE_BASE_M=${RATE_BASE_M:-20}
 
 IPERF3_ENV=""
-[ -n "${IPERF3_DSCP_DEBUG}" ] && IPERF3_ENV="IPERF3_DSCP_DEBUG=${IPERF3_DSCP_DEBUG}"
+[ -n "${IPERF3_DSCP_DEBUG:-}" ] && IPERF3_ENV="IPERF3_DSCP_DEBUG=${IPERF3_DSCP_DEBUG}"
 
 timestamp() { date '+%H:%M:%S'; }
 timestamp_us() { date '+%H:%M:%S.%N' | cut -b1-16; }
 
-LOG_FILE="/tmp/iperf3_dscp_12x02s_dl.log"
-UE1_LOG="/tmp/iperf3_dscp_12x02s_dl_ue1.log"
+LOG_FILE="/tmp/iperf3_dscp_100cycles_dl.log"
+UE1_LOG="/tmp/iperf3_dscp_100cycles_dl_ue1.log"
+UE2_LOG="/tmp/iperf3_dscp_100cycles_dl_ue2.log"
+UE3_LOG="/tmp/iperf3_dscp_100cycles_dl_ue3.log"
 
 log_event() {
     local msg="$1"
@@ -51,9 +58,7 @@ show_progress() {
         "$(printf '#%.0s' $(seq 1 $((percent / 2))))" "$percent" "$elapsed" "$total"
 }
 
-# 한 줄 --dscp-change 인자: d0,t1,d1,...,dN (N = TRANSITIONS, 값 개수 TRANSITIONS+1)
-# DSCP 순서: 0,44,24,15 반복 (seq[k%4] 가 k번째 값)
-build_dscp_change_12() {
+build_dscp_change() {
     awk -v step="$STEP_SEC" -v n="$TRANSITIONS" 'BEGIN {
         seq[0]=0; seq[1]=44; seq[2]=24; seq[3]=15
         printf "%d", seq[0]
@@ -64,15 +69,11 @@ build_dscp_change_12() {
     }'
 }
 
-# rate1,t1,...,rate_{n+1} — 비트레이만 사이클, 시각 축은 DSCP와 동일
 build_rate_change_matched() {
     awk -v step="$STEP_SEC" -v n="$TRANSITIONS" -v base="$RATE_BASE_M" 'BEGIN {
-        rlow = int(base / 10)
-        if (rlow < 1) rlow = 1
-        rmid = int(base / 20)
-        if (rmid < 1) rmid = 1
-        rhigh = int(base * 3 / 4)
-        if (rhigh < 1) rhigh = 1
+        rlow = int(base / 10); if (rlow < 1) rlow = 1
+        rmid = int(base / 20); if (rmid < 1) rmid = 1
+        rhigh = int(base * 3 / 4); if (rhigh < 1) rhigh = 1
         printf "%dM", base
         for (i = 1; i <= n; i++) {
             m = i % 4
@@ -86,25 +87,39 @@ build_rate_change_matched() {
     }'
 }
 
-DSCP_CHANGE_ARGS=$(build_dscp_change_12)
+if [ "$TRANSITIONS" -gt "$MAX_TRANSITIONS" ]; then
+    echo "ERROR: TRANSITIONS=$TRANSITIONS exceeds max $MAX_TRANSITIONS for current iperf build."
+    echo "       Lower CYCLES/TRANSITIONS or raise IPERF_MAX_DSCP_TRANSITIONS in src/iperf.h."
+    exit 1
+fi
+
+LAST_CHANGE_TIME=$(awk -v s="$STEP_SEC" -v n="$TRANSITIONS" 'BEGIN{printf "%.6f", s*n}')
+TOTAL_DUR_MIN=$(awk -v t="$LAST_CHANGE_TIME" 'BEGIN{printf "%d", int(t)+1}')
+if [ "$TOTAL_DUR" -lt "$TOTAL_DUR_MIN" ]; then
+    echo "ERROR: TOTAL_DUR=$TOTAL_DUR is too short. Need >= $TOTAL_DUR_MIN (last change at ${LAST_CHANGE_TIME}s)."
+    exit 1
+fi
+
+DSCP_CHANGE_ARGS=$(build_dscp_change)
 if [ "$USE_RATE_CHANGE" = "1" ]; then
     RATE_CHANGE_ARGS=$(build_rate_change_matched)
 fi
 
 echo "==========================================" > "$LOG_FILE"
-echo "  iperf3 DSCP 12×${STEP_SEC}s (DL, 단일 UDP)" >> "$LOG_FILE"
+echo "  iperf3 DSCP 100 cycles (DL, single UDP)" >> "$LOG_FILE"
 echo "  시작: $(timestamp_us)" >> "$LOG_FILE"
-echo "  STEP_SEC=$STEP_SEC TRANSITIONS=$TRANSITIONS TOTAL_DUR=$TOTAL_DUR" >> "$LOG_FILE"
+echo "  STEP_SEC=$STEP_SEC CYCLES=$CYCLES TRANSITIONS=$TRANSITIONS TOTAL_DUR=$TOTAL_DUR" >> "$LOG_FILE"
 echo "  --dscp-change ${DSCP_CHANGE_ARGS}" >> "$LOG_FILE"
 echo "==========================================" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 
 echo "=========================================="
-echo "  iperf3 DSCP — 0.2s 간격 12전환 (DL)"
+echo "  iperf3 DSCP — ${STEP_SEC}s 간격 ${CYCLES}주기 (DL)"
 echo "=========================================="
 echo ""
-echo "  UE1 (UDP): --dscp-change 한 세션 (${TRANSITIONS}회 전환, ${STEP_SEC}s 간격)"
-echo "    패턴: 0→44→24→15 × 3 (마지막 0)"
+echo "  UE1 (UDP): --dscp-change 한 세션 (${TRANSITIONS}회 전환)"
+echo "    패턴: 0->44->24->15->0 반복"
+echo "    마지막 전환 시각: ${LAST_CHANGE_TIME}s"
 echo "  UE2/UE3 (TCP): -S 0, ${TOTAL_DUR}초"
 if [ "$USE_RATE_CHANGE" = "1" ]; then
     echo "  UE1: + --rate-change (전환 시각 동일)"
@@ -135,6 +150,17 @@ echo "  UE2/3: TCP -S 0"
 echo "=========================================="
 log_event "UE1 DL 시작 (단일 UDP, ${TRANSITIONS}전환)"
 
+# UE2/UE3는 병행 트래픽 유지를 위해 백그라운드로 실행
+iperf3 -c "$UE2_IP" -t "$TOTAL_DUR" -p 6501 -i 1 -S 0 > "$UE2_LOG" 2>&1 &
+DL1_PID=$!
+iperf3 -c "$UE3_IP" -t "$TOTAL_DUR" -p 6502 -i 1 -S 0 > "$UE3_LOG" 2>&1 &
+DL2_PID=$!
+
+echo "  DL PIDs: UE2=$DL1_PID UE3=$DL2_PID"
+echo ""
+
+# UE1은 백그라운드 실행(상세 출력은 파일로만 저장) + 1초 진행상황 표시
+echo "[$(timestamp)] UE1 iperf3 상세 로그는 파일에 저장되고, 진행률만 표시합니다."
 if [ "$USE_RATE_CHANGE" = "1" ]; then
     env ${IPERF3_ENV} iperf3 -c "$UE1_IP" -u -t "$TOTAL_DUR" -p 6500 -i 1 -d \
         --dscp-change "${DSCP_CHANGE_ARGS}" \
@@ -147,32 +173,19 @@ else
 fi
 DL0_PID=$!
 
-iperf3 -c "$UE2_IP" -t "$TOTAL_DUR" -p 6501 -i 1 -S 0 \
-    > /tmp/iperf3_dscp_12x02s_dl_ue2.log 2>&1 &
-DL1_PID=$!
-iperf3 -c "$UE3_IP" -t "$TOTAL_DUR" -p 6502 -i 1 -S 0 \
-    > /tmp/iperf3_dscp_12x02s_dl_ue3.log 2>&1 &
-DL2_PID=$!
-
-echo "  DL PIDs: UE1=$DL0_PID UE2=$DL1_PID UE3=$DL2_PID"
-echo ""
-
-LAST_CHG=0
 for i in $(seq 1 "$TOTAL_DUR"); do
-    show_progress "$i" "$TOTAL_DUR"
-    if [ -f "$UE1_LOG" ]; then
-        CUR=$(grep -c -i "Changed DSCP" "$UE1_LOG" 2>/dev/null || true)
-        [ -z "$CUR" ] && CUR=0
-        if [ "$CUR" -gt "$LAST_CHG" ] 2>/dev/null; then
-            tail -n 5 "$UE1_LOG" | grep -i "Changed DSCP" | tail -1 | while read -r line; do
-                log_event "UE1: $line"
-            done
-            LAST_CHG=$CUR
-        fi
+    if ! kill -0 "$DL0_PID" 2>/dev/null; then
+        break
     fi
+    show_progress "$i" "$TOTAL_DUR"
     sleep 1
 done
 printf "\n"
+
+wait "$DL0_PID" 2>/dev/null || true
+
+# UE2/UE3 종료 대기 (이미 끝났을 수도 있음)
+wait "$DL1_PID" "$DL2_PID" 2>/dev/null || true
 
 echo "[$(timestamp)] UE1 DSCP/Rate 로그 요약"
 if grep -qi "Changed DSCP" "$UE1_LOG" 2>/dev/null; then
@@ -196,6 +209,7 @@ echo "=========================================="
 echo "완료"
 echo "  로그: $LOG_FILE"
 echo "  UE1: $UE1_LOG"
-echo "  UE2/3: /tmp/iperf3_dscp_12x02s_dl_ue2.log, ...ue3.log"
+echo "  UE2: $UE2_LOG"
+echo "  UE3: $UE3_LOG"
 echo "=========================================="
 log_event "종료 $(timestamp_us)"
