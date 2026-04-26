@@ -1,7 +1,7 @@
 #!/bin/bash
 # iperf3 DSCP 시나리오 (DL 전용) — 단일 UDP 세션, 0.2초마다 DSCP 전환
 #
-# 패턴: 0->44->24->15->0 를 100주기 반복 (총 400 transitions)
+# 패턴: 0->32->24->15->0 를 100주기 반복 (총 400 transitions)
 # 시각: 0.2, 0.4, ..., 80.0초
 #
 # UE1: UDP + --dscp-change (커스텀 iperf_QoS-1: 최대 400전환)
@@ -60,7 +60,7 @@ show_progress() {
 
 build_dscp_change() {
     awk -v step="$STEP_SEC" -v n="$TRANSITIONS" 'BEGIN {
-        seq[0]=0; seq[1]=44; seq[2]=24; seq[3]=15
+        seq[0]=0; seq[1]=32; seq[2]=24; seq[3]=15
         printf "%d", seq[0]
         for (i = 1; i <= n; i++) {
             printf ",%.6f,%d", step * i, seq[i % 4]
@@ -118,7 +118,7 @@ echo "  iperf3 DSCP — ${STEP_SEC}s 간격 ${CYCLES}주기 (DL)"
 echo "=========================================="
 echo ""
 echo "  UE1 (UDP): --dscp-change 한 세션 (${TRANSITIONS}회 전환)"
-echo "    패턴: 0->44->24->15->0 반복"
+echo "    패턴: 0->32->24->15->0 반복"
 echo "    마지막 전환 시각: ${LAST_CHANGE_TIME}s"
 echo "  UE2/UE3 (TCP): -S 0, ${TOTAL_DUR}초"
 if [ "$USE_RATE_CHANGE" = "1" ]; then
