@@ -1,298 +1,221 @@
 #!/usr/bin/env python3
 """
-UE별 Throughput 정보 추출 스크립트
-로그 파일에서 각 UE의 throughput 정보를 추출합니다.
-타임스탬프는 마이크로초 단위로 추출됩니다.
+Extract UE throughput from gNB logs with optional time re-binning.
+
+Default behavior:
+  - Parse "UEX Throughput calc" lines
+  - Filter UE0
+  - Output timestamp + DL Mbps at 10ms bins
+
+Also supports:
+  - --bin-ms 50 / 100 / any positive integer
+  - UL / TOTAL direction
 """
 
+from __future__ import annotations
+
+import argparse
 import re
 import sys
-from collections import defaultdict
-from typing import Dict, List, Optional
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import List
 
-def parse_throughput_log(log_file: str) -> Dict[int, List[Dict]]:
+
+THROUGHPUT_RE = re.compile(
+    r"^(?:\d+:)?\s*(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+).*?"
+    r"UE(?P<ue>\d+)\s+Throughput calc:\s+"
+    r"sum_dl_tb_bytes=(?P<dl_bytes>\d+),\s+period=(?P<period_ms>\d+)ms,\s+"
+    r"dl_brate_kbps=(?P<dl_kbps>[\d.]+)\s+\(=(?P<dl_mbps>[\d.]+)Mbps\),\s+dl_nof_ok=(?P<dl_ok>\d+),\s+"
+    r"ul_brate_kbps=(?P<ul_kbps>[\d.]+)\s+\(=(?P<ul_mbps>[\d.]+)Mbps\),\s+ul_nof_ok=(?P<ul_ok>\d+)"
+)
+
+
+@dataclass
+class Entry:
+    ts: datetime
+    ue: int
+    period_ms: int
+    dl_bytes: int
+    ul_kbps: float
+
+
+@dataclass
+class Bin:
+    start: datetime
+    dl_bytes: int = 0
+    ul_bits: float = 0.0
+    total_period_ms: int = 0
+
+
+def _parse_start_time_arg(value: str, date_fallback: datetime | None) -> datetime:
     """
-    로그 파일에서 UE별 throughput 정보를 파싱합니다.
-    
-    Throughput calc 로그만 파싱 (시스템에서 계산된 정확한 값, 동적 period 사용)
-    
-    Args:
-        log_file: 로그 파일 경로
-        
-    Returns:
-        UE 인덱스를 키로 하고, throughput 정보 딕셔너리 리스트를 값으로 하는 딕셔너리
+    Parse --start-time.
+    Accepts either:
+      - Full ISO time: 2026-04-26T09:16:29.553284
+      - Time only:     09:16:29.553284 (date is inferred from first matched log line)
     """
-    ue_data = defaultdict(list)
-    
-    # Throughput calc 로그 패턴 (DL + UL 모두 파싱)
-    # 예: UE0 Throughput calc: sum_dl_tb_bytes=1000000, period=1000ms, dl_brate_kbps=8000.00 (=8.00Mbps), dl_nof_ok=100, ul_brate_kbps=5000.00 (=5.00Mbps), ul_nof_ok=50
-    throughput_pattern = re.compile(
-        r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+).*?'
-        r'UE(\d+)\s+Throughput calc:\s+'
-        r'sum_dl_tb_bytes=(\d+),\s+period=(\d+)ms,\s+'
-        r'dl_brate_kbps=([\d.]+)\s+\(=([\d.]+)Mbps\),\s+dl_nof_ok=(\d+)'
-        r'(?:,\s+ul_brate_kbps=([\d.]+)\s+\(=([\d.]+)Mbps\),\s+ul_nof_ok=(\d+))?'
-    )
-    
-    try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                # Throughput calc 로그 파싱
-                match = throughput_pattern.search(line)
-                if match:
-                    timestamp_str = match.group(1)
-                    ue_idx = int(match.group(2))
-                    try:
-                        timestamp = datetime.fromisoformat(timestamp_str)
-                    except ValueError:
-                        timestamp = None
-                    
-                    # DL 정보
-                    sum_dl_tb_bytes = int(match.group(3))
-                    period_ms = int(match.group(4))
-                    dl_brate_kbps = float(match.group(5))
-                    dl_brate_mbps = float(match.group(6))
-                    dl_nof_ok = int(match.group(7))
-                    
-                    # UL 정보 (있을 수도, 없을 수도 있음)
-                    ul_brate_kbps = float(match.group(8)) if match.group(8) else 0.0
-                    ul_brate_mbps = float(match.group(9)) if match.group(9) else 0.0
-                    ul_nof_ok = int(match.group(10)) if match.group(10) else 0
-                    
-                    # Total (DL + UL) 계산
-                    total_brate_kbps = dl_brate_kbps + ul_brate_kbps
-                    total_brate_mbps = dl_brate_mbps + ul_brate_mbps
-                    
-                    entry = {
-                        'line': line_num,
-                        'timestamp': timestamp,
-                        'timestamp_str': timestamp_str,
-                        'type': 'calculated',
-                        'sum_dl_tb_bytes': sum_dl_tb_bytes,
-                        'period_ms': period_ms,
-                        'dl_brate_kbps': dl_brate_kbps,
-                        'dl_brate_mbps': dl_brate_mbps,
-                        'dl_nof_ok': dl_nof_ok,
-                        'ul_brate_kbps': ul_brate_kbps,
-                        'ul_brate_mbps': ul_brate_mbps,
-                        'ul_nof_ok': ul_nof_ok,
-                        'total_brate_kbps': total_brate_kbps,
-                        'total_brate_mbps': total_brate_mbps,
-                        'raw_line': line.strip()
-                    }
-                    ue_data[ue_idx].append(entry)
-    except FileNotFoundError:
-        print(f"Error: 파일 '{log_file}'을 찾을 수 없습니다.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: 파일 읽기 중 오류 발생: {e}")
-        sys.exit(1)
-    
-    # 각 UE별로 타임스탬프 기준으로 정렬
-    for ue_idx in ue_data.keys():
-        ue_data[ue_idx] = sorted(
-            ue_data[ue_idx], 
-            key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max
-        )
-    
-    return ue_data
+    if "T" in value:
+        return datetime.fromisoformat(value)
+    if date_fallback is None:
+        raise ValueError("time-only --start-time requires at least one matched log line to infer date")
+    t = datetime.strptime(value, "%H:%M:%S.%f").time()
+    return datetime.combine(date_fallback.date(), t)
 
-def get_global_first_timestamp(ue_data: Dict[int, List[Dict]]) -> Optional[datetime]:
-    """모든 UE의 레코드 중 가장 이른 타임스탬프를 찾습니다."""
-    global_first = None
-    for ue_idx, entries in ue_data.items():
-        for entry in entries:
-            if entry['timestamp'] is not None:
-                if global_first is None or entry['timestamp'] < global_first:
-                    global_first = entry['timestamp']
-    return global_first
 
-def print_throughput_summary(ue_data: Dict[int, List[Dict]]):
-    """UE별 throughput 요약 정보를 출력합니다."""
-    print("=" * 100)
-    print("UE별 Throughput 정보 요약")
-    print("=" * 100)
-    
-    for ue_idx in sorted(ue_data.keys()):
-        entries = ue_data[ue_idx]
-        if not entries:
-            continue
-        
-        calculated_entries = [e for e in entries if e['type'] == 'calculated']
-        
-        print(f"\n[UE{ue_idx}]")
-        print("-" * 100)
-        
-        if calculated_entries:
-            dl_throughputs = [e['dl_brate_mbps'] for e in calculated_entries]
-            ul_throughputs = [e['ul_brate_mbps'] for e in calculated_entries if e['ul_brate_mbps'] > 0]
-            total_throughputs = [e['total_brate_mbps'] for e in calculated_entries]
-            
-            print(f"  계산된 Throughput (시스템 계산값, 동적 period):")
-            print(f"    DL Throughput:")
-            print(f"      - 최소값: {min(dl_throughputs):.2f} Mbps")
-            print(f"      - 최대값: {max(dl_throughputs):.2f} Mbps")
-            print(f"      - 평균값: {sum(dl_throughputs) / len(dl_throughputs):.2f} Mbps")
-            if ul_throughputs:
-                print(f"    UL Throughput:")
-                print(f"      - 최소값: {min(ul_throughputs):.2f} Mbps")
-                print(f"      - 최대값: {max(ul_throughputs):.2f} Mbps")
-                print(f"      - 평균값: {sum(ul_throughputs) / len(ul_throughputs):.2f} Mbps")
-            print(f"    Total (DL+UL) Throughput:")
-            print(f"      - 최소값: {min(total_throughputs):.2f} Mbps")
-            print(f"      - 최대값: {max(total_throughputs):.2f} Mbps")
-            print(f"      - 평균값: {sum(total_throughputs) / len(total_throughputs):.2f} Mbps")
-            print(f"    - 레코드 수: {len(calculated_entries)}")
+def parse_entries(log_path: str, ue_filter: int, start_time: str | None = None) -> List[Entry]:
+    entries: List[Entry] = []
+    first_ts: datetime | None = None
+    start_dt: datetime | None = None
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = THROUGHPUT_RE.search(line)
+            if not m:
+                continue
+            ue = int(m.group("ue"))
+            if ue != ue_filter:
+                continue
+            ts = datetime.fromisoformat(m.group("ts"))
+            period_ms = int(m.group("period_ms"))
+            dl_bytes = int(m.group("dl_bytes"))
+            ul_kbps = float(m.group("ul_kbps"))
+            if first_ts is None:
+                first_ts = ts
+            if start_time is not None and start_dt is None:
+                start_dt = _parse_start_time_arg(start_time, first_ts)
+            if start_dt is not None and ts < start_dt:
+                continue
+            entries.append(Entry(ts=ts, ue=ue, period_ms=period_ms, dl_bytes=dl_bytes, ul_kbps=ul_kbps))
+    entries.sort(key=lambda e: e.ts)
+    return entries
 
-def print_throughput_detailed(ue_data: Dict[int, List[Dict]], ue_idx: Optional[int] = None, use_global_time: bool = True):
-    """특정 UE의 상세 throughput 정보를 출력합니다. (마이크로초 단위 타임스탬프)"""
-    if ue_idx is not None:
-        ues_to_print = [ue_idx] if ue_idx in ue_data else []
+
+def bin_entries(entries: List[Entry], bin_ms: int) -> List[Bin]:
+    if not entries:
+        return []
+
+    base = entries[0].ts
+    bins = {}
+    for e in entries:
+        delta_ms = (e.ts - base).total_seconds() * 1000.0
+        idx = int(delta_ms // bin_ms)
+        if idx not in bins:
+            bins[idx] = Bin(start=base + timedelta(milliseconds=idx * bin_ms))
+        bins[idx].dl_bytes += e.dl_bytes
+        # ul_kbps is kilobits/sec and period_ms is milliseconds.
+        # bits = kbps * period_ms (1000/1000 cancels out).
+        bins[idx].ul_bits += e.ul_kbps * e.period_ms
+        bins[idx].total_period_ms += e.period_ms
+
+    return [bins[i] for i in sorted(bins.keys())]
+
+
+def compute_mbps(b: Bin, direction: str) -> float:
+    dl_bits = b.dl_bytes * 8.0
+    ul_bits = b.ul_bits
+    if direction == "dl":
+        bits = dl_bits
+    elif direction == "ul":
+        bits = ul_bits
     else:
-        ues_to_print = sorted(ue_data.keys())
-    
-    # 공통 기준 시간 계산
-    global_first_timestamp = None
-    if use_global_time:
-        global_first_timestamp = get_global_first_timestamp(ue_data)
-        if global_first_timestamp:
-            print(f"\n{'=' * 100}")
-            print(f"[공통 기준 시간] {global_first_timestamp.isoformat()} (마이크로초 단위)")
-            print(f"{'=' * 100}")
-    
-    for ue in ues_to_print:
-        entries = ue_data[ue]
-        if not entries:
-            continue
-        
-        entries_sorted = sorted(entries, key=lambda x: x['timestamp'] if x['timestamp'] is not None else datetime.max)
-        
-        # 기준 시간 선택
-        if use_global_time and global_first_timestamp is not None:
-            first_timestamp = global_first_timestamp
-            time_label = "공통 기준 시간"
-        else:
-            first_timestamp = None
-            for entry in entries_sorted:
-                if entry['timestamp'] is not None:
-                    first_timestamp = entry['timestamp']
-                    break
-            time_label = "UE별 기준 시간"
-        
-        if first_timestamp is None:
-            print(f"\n[경고] UE{ue}: 유효한 타임스탬프가 없습니다.")
-            continue
-        
-        # Throughput calc 로그만 필터링
-        calculated_entries = [e for e in entries_sorted if e['type'] == 'calculated']
-        
-        if not calculated_entries:
-            print(f"\n[경고] UE{ue}: Throughput calc 로그가 없습니다.")
-            continue
-        
-        print(f"\n{'=' * 100}")
-        print(f"UE{ue} Throughput 상세 정보 (시스템 계산값, 동적 period, 타임스탬프: 마이크로초 단위)")
-        print(f"전체 {len(calculated_entries)}개 | {time_label}: {first_timestamp.isoformat()}")
-        print(f"{'=' * 100}")
-        print(f"{'상대시간(초.마이크로초)':<25} {'절대시간(시:분:초.마이크로초)':<30} {'DL (Mbps)':<12} {'UL (Mbps)':<12} {'Total (Mbps)':<15} {'Period (ms)':<12} {'DL Bytes':<12} {'HARQ OK':<10}")
-        print("-" * 100)
-        
-        # 중복 제거: 같은 타임스탬프를 가진 항목은 하나만 출력
-        seen_timestamps = set()
-        unique_entries = []
-        for entry in calculated_entries:
-            if entry['timestamp'] is not None:
-                # 타임스탬프를 마이크로초 단위로 중복 체크
-                ts_key = entry['timestamp'].isoformat()
-                if ts_key not in seen_timestamps:
-                    seen_timestamps.add(ts_key)
-                    unique_entries.append(entry)
-            else:
-                unique_entries.append(entry)
-        
-        for entry in unique_entries:
-            if entry['timestamp'] is not None:
-                # 상대 시간 계산 (초.마이크로초)
-                time_diff = entry['timestamp'] - first_timestamp
-                rel_time_sec = time_diff.total_seconds()
-                
-                # 절대 시간 표시 (시:분:초.마이크로초)
-                abs_time_str = entry['timestamp'].strftime("%H:%M:%S.%f")
-                rel_time_str = f"{rel_time_sec:.6f}"
-            else:
-                abs_time_str = "N/A"
-                rel_time_str = "N/A"
-            
-            ul_display = f"{entry['ul_brate_mbps']:.2f}" if entry['ul_brate_mbps'] > 0 else "N/A"
-            
-            print(f"{rel_time_str:<25} "
-                  f"{abs_time_str:<30} "
-                  f"{entry['dl_brate_mbps']:<12.2f} "
-                  f"{ul_display:<12} "
-                  f"{entry['total_brate_mbps']:<15.2f} "
-                  f"{entry['period_ms']:<12} "
-                  f"{entry['sum_dl_tb_bytes']:<12} "
-                  f"{entry['dl_nof_ok']:<10}")
+        bits = dl_bits + ul_bits
+    if b.total_period_ms <= 0:
+        return 0.0
+    # Mbps = bits / (ms * 1000)
+    return bits / (b.total_period_ms * 1000.0)
 
-def main():
-    default_log_file = 'gnb.log'
-    
-    if len(sys.argv) >= 2 and sys.argv[1] in ['-h', '--help']:
-        print("Usage: python extract_ue_throughput.py [log_file] [options]")
-        print(f"\nArguments:")
-        print(f"  log_file       로그 파일 경로 (기본값: {default_log_file})")
-        print("\nOptions:")
-        print("  -u <ue_idx>    특정 UE만 출력 (예: -u 0)")
-        print("  -g, --global   모든 UE를 공통 기준 시간으로 정렬 (기본값)")
-        print("  -h, --help     도움말 출력")
-        print("\n타임스탬프는 마이크로초 단위로 추출/출력됩니다.")
-        sys.exit(0)
-    
-    if len(sys.argv) >= 2 and not sys.argv[1].startswith('-'):
-        log_file = sys.argv[1]
-        opt_start = 2
-    else:
-        log_file = default_log_file
-        opt_start = 1
-    
-    ue_idx = None
-    use_global_time = True
-    
-    i = opt_start
-    while i < len(sys.argv):
-        if sys.argv[i] == '-u' and i + 1 < len(sys.argv):
-            ue_idx = int(sys.argv[i + 1])
-            i += 2
-        elif sys.argv[i] in ['-g', '--global']:
-            use_global_time = True
-            i += 1
-        else:
-            print(f"Warning: 알 수 없는 옵션 '{sys.argv[i]}' (무시됨)")
-            i += 1
-    
-    print(f"로그 파일 파싱 중: {log_file} (타임스탬프: 마이크로초 단위)")
-    ue_data = parse_throughput_log(log_file)
-    
-    if not ue_data:
-        print("추출된 데이터가 없습니다.")
-        sys.exit(1)
-    
-    # Throughput calc 로그 확인
-    has_calculated = any(
-        any(e['type'] == 'calculated' for e in entries)
-        for entries in ue_data.values()
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Extract UE throughput with configurable bin size.")
+    ap.add_argument("log_file", help="Path to gnb.log")
+    ap.add_argument("--ue", type=int, default=0, help="UE index to extract (default: 0)")
+    ap.add_argument("--bin-ms", type=int, default=10, help="Output bin in ms (default: 10)")
+    ap.add_argument(
+        "--start-time",
+        type=str,
+        default=None,
+        help="Only include entries at/after this time. Format: HH:MM:SS.ffffff or YYYY-MM-DDTHH:MM:SS.ffffff",
     )
-    
-    if not has_calculated:
-        print("\n[경고] Throughput calc 로그가 없습니다.")
-        print("  시스템에서 계산된 throughput 정보가 로그에 포함되어야 합니다.")
-    
-    # 요약 정보 출력
-    print_throughput_summary(ue_data)
-    
-    # 상세 정보 출력
-    print_throughput_detailed(ue_data, ue_idx, use_global_time)
+    ap.add_argument(
+        "--direction",
+        choices=["dl", "ul", "total"],
+        default="dl",
+        help="Throughput direction (default: dl)",
+    )
+    ap.add_argument(
+        "--no-header",
+        action="store_true",
+        help="Print only rows without header",
+    )
+    ap.add_argument(
+        "--relative-time",
+        action="store_true",
+        help="Output x-axis as relative seconds from first output row (starts at 0.0)",
+    )
+    ap.add_argument(
+        "--plot",
+        action="store_true",
+        help="Generate throughput plot image (PNG)",
+    )
+    ap.add_argument(
+        "--plot-file",
+        type=str,
+        default="throughput_plot.png",
+        help="Output plot filename when --plot is set (default: throughput_plot.png)",
+    )
+    args = ap.parse_args()
 
-if __name__ == '__main__':
-    main()
+    if args.bin_ms <= 0:
+        print("ERROR: --bin-ms must be > 0", file=sys.stderr)
+        return 2
+
+    entries = parse_entries(args.log_file, args.ue, args.start_time)
+    if not entries:
+        print(f"No throughput entries found for UE{args.ue} in {args.log_file}", file=sys.stderr)
+        return 1
+
+    bins = bin_entries(entries, args.bin_ms)
+    first_out_ts = bins[0].start if bins else None
+    x_vals: List[float] = []
+    y_vals: List[float] = []
+    if not args.no_header:
+        if args.relative_time:
+            print("rel_time_s,throughput_mbps")
+        else:
+            print("timestamp,throughput_mbps")
+    for b in bins:
+        mbps = compute_mbps(b, args.direction)
+        if args.relative_time:
+            rel_s = (b.start - first_out_ts).total_seconds() if first_out_ts is not None else 0.0
+            x_vals.append(rel_s)
+            y_vals.append(mbps)
+            print(f"{rel_s:.6f},{mbps:.2f}")
+        else:
+            if first_out_ts is not None:
+                rel_s = (b.start - first_out_ts).total_seconds()
+                x_vals.append(rel_s)
+                y_vals.append(mbps)
+            print(f"{b.start.strftime('%Y-%m-%dT%H:%M:%S.%f')},{mbps:.2f}")
+
+    if args.plot:
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as e:
+            print(f"ERROR: matplotlib import failed: {e}", file=sys.stderr)
+            return 3
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(x_vals, y_vals, linewidth=1.2)
+        plt.xlabel("Time (s)")
+        plt.ylabel("Throughput (Mbps)")
+        plt.title(f"UE{args.ue} {args.direction.upper()} Throughput ({args.bin_ms}ms bin)")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(args.plot_file, dpi=150)
+        print(f"# plot saved: {args.plot_file}", file=sys.stderr)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
