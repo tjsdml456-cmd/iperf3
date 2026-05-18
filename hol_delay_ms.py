@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-Extract HOL delay and PDB values from [DELAY-WEIGHT] scheduler logs.
+Extract [DELAY-WEIGHT] rows from gNB scheduler logs.
 
-Example:
-  python3 extract_hol_pdb.py /tmp/gnb.log --ue 0 --lcid 4 --relative-time > hol_pdb.csv
+Example line:
+  2026-05-18T07:40:41.550290 [SCHED] [I] [168.4] [DELAY-WEIGHT] UE0 LCID4
+    hol_toa=227 slot_tx=1684 hol_delay_ms=1457 PDB=30ms delay_contrib=48.567 delay_weight=48.567
+
+Default output (CSV, no header):
+  timestamp,hol_delay_ms,pdb_ms
+  ...
+
+With --relative-time, first column is seconds from first emitted row (wall clock).
+With --start-time, only rows at/after that timestamp are included.
 """
 
 from __future__ import annotations
@@ -16,144 +24,115 @@ from datetime import datetime
 from typing import List, Optional
 
 
-DELAY_RE = re.compile(
+LINE_RE = re.compile(
     r"^(?:\d+:)?\s*(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+).*?"
-    r"\[DELAY-WEIGHT\]\s+UE(?P<ue>\d+)\s+LCID(?P<lcid>\d+).*?"
-    r"hol_delay_ms=(?P<hol>\d+)\s+PDB=(?P<pdb>\d+)ms\s+"
-    r"delay_contrib=(?P<contrib>[\d.]+)\s+delay_weight=(?P<weight>[\d.]+)"
+    r"\[DELAY-WEIGHT\]\s+"
+    r"UE(?P<ue>\d+)\s+"
+    r"LCID\d+\s+"
+    r"hol_toa=\d+\s+slot_tx=\d+\s+"
+    r"hol_delay_ms=(?P<hol_ms>[\d.]+)\s+"
+    r"PDB=(?P<pdb>\d+)ms",
+    re.IGNORECASE,
 )
 
 
 @dataclass
-class DelayRow:
+class Row:
     ts: datetime
     ue: int
-    lcid: int
-    hol_delay_ms: int
+    hol_delay_ms: float
     pdb_ms: int
-    delay_contrib: float
-    delay_weight: float
 
 
-def parse_start_time_arg(value: str, date_fallback: Optional[datetime]) -> datetime:
-    if "T" in value:
-        return datetime.fromisoformat(value)
+def _clip_frac6(s: str) -> str:
+    if "." not in s:
+        return s
+    base, frac = s.split(".", 1)
+    digits = "".join(c for c in frac if c.isdigit())
+    digits = (digits + "000000")[:6]
+    return f"{base}.{digits}"
+
+
+def parse_wall(value: str, date_fallback: Optional[datetime]) -> datetime:
+    v = _clip_frac6(value)
+    if "T" in v:
+        return datetime.fromisoformat(v)
     if date_fallback is None:
-        raise ValueError("time-only --start-time requires at least one matched log line to infer date")
-    t = datetime.strptime(value, "%H:%M:%S.%f").time()
+        raise ValueError("time-only --start-time requires at least one matched log line")
+    t = datetime.strptime(v, "%H:%M:%S.%f").time() if "." in v else datetime.strptime(v, "%H:%M:%S").time()
     return datetime.combine(date_fallback.date(), t)
 
 
-def parse_rows(
-    log_file: str,
-    ue_filter: Optional[int],
-    lcid_filter: Optional[int],
-    start_time: Optional[str],
-) -> List[DelayRow]:
-    rows: List[DelayRow] = []
-    first_ts: Optional[datetime] = None
-    start_dt: Optional[datetime] = None
-
-    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            m = DELAY_RE.search(line)
+def parse_log(path: str, ue_filter: int) -> List[Row]:
+    rows: List[Row] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            m = LINE_RE.search(raw)
             if not m:
                 continue
-
-            ts = datetime.fromisoformat(m.group("ts"))
             ue = int(m.group("ue"))
-            lcid = int(m.group("lcid"))
-            hol = int(m.group("hol"))
-            pdb = int(m.group("pdb"))
-            contrib = float(m.group("contrib"))
-            weight = float(m.group("weight"))
-
-            if first_ts is None:
-                first_ts = ts
-            if start_time is not None and start_dt is None:
-                start_dt = parse_start_time_arg(start_time, first_ts)
-            if start_dt is not None and ts < start_dt:
+            if ue != ue_filter:
                 continue
-            if ue_filter is not None and ue != ue_filter:
-                continue
-            if lcid_filter is not None and lcid != lcid_filter:
-                continue
-
+            ts = datetime.fromisoformat(m.group("ts"))
             rows.append(
-                DelayRow(
+                Row(
                     ts=ts,
                     ue=ue,
-                    lcid=lcid,
-                    hol_delay_ms=hol,
-                    pdb_ms=pdb,
-                    delay_contrib=contrib,
-                    delay_weight=weight,
+                    hol_delay_ms=float(m.group("hol_ms")),
+                    pdb_ms=int(m.group("pdb")),
                 )
             )
-
     rows.sort(key=lambda r: r.ts)
     return rows
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Extract HOL delay/PDB from [DELAY-WEIGHT] logs.")
+    ap = argparse.ArgumentParser(
+        description="Extract hol_delay_ms and PDB from [DELAY-WEIGHT] log lines."
+    )
     ap.add_argument("log_file", help="Path to gnb.log")
-    ap.add_argument("--ue", type=int, default=None, help="Filter UE index (e.g. 0)")
-    ap.add_argument("--lcid", type=int, default=None, help="Filter LCID (e.g. 4)")
+    ap.add_argument("--ue", type=int, default=0, help="UE index (default: 0)")
     ap.add_argument(
         "--start-time",
         type=str,
         default=None,
-        help="Only include rows at/after this time. Format: HH:MM:SS.ffffff or YYYY-MM-DDTHH:MM:SS.ffffff",
+        help="Only rows at/after this time (HH:MM:SS.ffffff or YYYY-MM-DDTHH:MM:SS.ffffff)",
     )
     ap.add_argument(
         "--relative-time",
         action="store_true",
-        help="Output x-axis as relative seconds from first output row (starts at 0.0)",
+        help="First column: relative seconds from first emitted row",
     )
-    ap.add_argument(
-        "--only-hol-pdb",
-        action="store_true",
-        help="Output only time + hol_delay_ms + pdb_ms columns",
-    )
-    ap.add_argument("--no-header", action="store_true", help="Print only rows without header")
+    ap.add_argument("--header", action="store_true", help="Print CSV header")
     args = ap.parse_args()
 
-    rows = parse_rows(args.log_file, args.ue, args.lcid, args.start_time)
+    rows = parse_log(args.log_file, args.ue)
     if not rows:
-        print("No [DELAY-WEIGHT] rows matched the given filters.", file=sys.stderr)
+        print(f"No [DELAY-WEIGHT] lines found for UE{args.ue}.", file=sys.stderr)
         return 1
 
-    base_ts = rows[0].ts
-    if not args.no_header:
-        if args.relative_time:
-            if args.only_hol_pdb:
-                print("rel_time_s,hol_delay_ms,pdb_ms")
-            else:
-                print("rel_time_s,hol_delay_ms,pdb_ms,delay_contrib,delay_weight,ue,lcid")
-        else:
-            if args.only_hol_pdb:
-                print("timestamp,hol_delay_ms,pdb_ms")
-            else:
-                print("timestamp,hol_delay_ms,pdb_ms,delay_contrib,delay_weight,ue,lcid")
+    if args.start_time is not None:
+        start_dt = parse_wall(args.start_time, rows[0].ts)
+        rows = [r for r in rows if r.ts >= start_dt]
+        if not rows:
+            print("No rows after --start-time filter.", file=sys.stderr)
+            return 1
 
+    if args.header:
+        if args.relative_time:
+            print("rel_time_s,pdb_ms,hol_delay_ms")
+        else:
+            print("timestamp,pdb_ms,hol_delay_ms")
+
+    base_ts = rows[0].ts
     for r in rows:
         if args.relative_time:
             rel = (r.ts - base_ts).total_seconds()
-            if args.only_hol_pdb:
-                print(f"{rel:.6f},{r.hol_delay_ms},{r.pdb_ms}")
-            else:
-                print(
-                    f"{rel:.6f},{r.hol_delay_ms},{r.pdb_ms},{r.delay_contrib:.3f},{r.delay_weight:.3f},{r.ue},{r.lcid}"
-                )
+            print(f"{rel:.6f},{r.pdb_ms},{r.hol_delay_ms:.3f}")
         else:
-            if args.only_hol_pdb:
-                print(f"{r.ts.strftime('%Y-%m-%dT%H:%M:%S.%f')},{r.hol_delay_ms},{r.pdb_ms}")
-            else:
-                print(
-                    f"{r.ts.strftime('%Y-%m-%dT%H:%M:%S.%f')},{r.hol_delay_ms},{r.pdb_ms},"
-                    f"{r.delay_contrib:.3f},{r.delay_weight:.3f},{r.ue},{r.lcid}"
-                )
+            print(
+                f"{r.ts.strftime('%Y-%m-%dT%H:%M:%S.%f')},{r.pdb_ms},{r.hol_delay_ms:.3f}"
+            )
 
     return 0
 
