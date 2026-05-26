@@ -1,13 +1,13 @@
 #!/bin/bash
-# iperf3 DSCP 시나리오 (DL 전용) — 단일 UDP 세션, 0.2초마다 DSCP 전환
+# iperf3 DSCP 시나리오 (DL 전용) — 단일 UDP 세션, 0.5초마다 DSCP 전환
 #
 # 패턴: 0->32->24->15->0 를 100주기 반복 (총 400 transitions)
-# 시각: 0.2, 0.4, ..., 80.0초
+# 시각: 0.5, 1.0, ..., 200.0초
 #
 # UE1: UDP + --dscp-change (커스텀 iperf_QoS-1: 최대 400전환)
 # UE2/UE3: TCP -S 0 고정 (DL만)
 #
-# iperf3 -t 는 정수 초만 허용 -> 기본 TOTAL_DUR=82 (80초 이후 여유)
+# iperf3 -t 는 정수 초만 허용 -> 기본 TOTAL_DUR=201 (200초 이후 여유)
 
 set -euo pipefail
 export LC_ALL=C
@@ -17,19 +17,19 @@ UE2_IP=${UE2_IP:-10.45.0.3}
 UE3_IP=${UE3_IP:-10.45.0.4}
 
 # 전환 간격(초)
-STEP_SEC=${STEP_SEC:-0.2}
+STEP_SEC=${STEP_SEC:-20.0}
 
 # 주기 수 / 전환 수
-CYCLES=${CYCLES:-100}
+CYCLES=${CYCLES:-2}
 TRANS_PER_CYCLE=4
 TRANSITIONS=${TRANSITIONS:-$((CYCLES * TRANS_PER_CYCLE))}
-MAX_TRANSITIONS=400
+MAX_TRANSITIONS=8
 
 # 테스트 길이(정수 초): 마지막 전환 시각보다 커야 함.
-TOTAL_DUR=${TOTAL_DUR:-82}
+TOTAL_DUR=${TOTAL_DUR:-162}
 
 USE_RATE_CHANGE=${USE_RATE_CHANGE:-0}
-UE1_FIXED_BITRATE=${UE1_FIXED_BITRATE:-20M}
+UE1_FIXED_BITRATE=${UE1_FIXED_BITRATE:-100M}
 RATE_BASE_M=${RATE_BASE_M:-20}
 
 IPERF3_ENV=""
