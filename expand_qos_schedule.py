@@ -156,15 +156,30 @@ def load_schedule(path: Path) -> List[ScheduleEvent]:
 
 
 def align_schedule_events(
-    events: List[ScheduleEvent], change_step: float
+    events: List[ScheduleEvent],
+    change_step: float,
+    *,
+    schedule_end: float,
+    repeat: bool = True,
 ) -> List[ScheduleEvent]:
-    """Keep QoS sequence order; place changes at 0, change_step, 2*change_step, ..."""
+    """Place changes at 0, change_step, ... up to schedule_end (inclusive)."""
     if change_step <= 0:
         raise ValueError("change_step must be > 0")
-    return [
-        ScheduleEvent(round(i * change_step, 6), ev.five_qi)
-        for i, ev in enumerate(events)
-    ]
+    if schedule_end < 0:
+        raise ValueError("schedule_end must be >= 0")
+    n = int(round(schedule_end / change_step)) + 1
+    if n < 1:
+        n = 1
+    if not repeat and n > len(events):
+        raise ValueError(
+            f"need {n} schedule points @ {change_step}s but only {len(events)} "
+            f"(use --repeat or shorter --schedule-end)"
+        )
+    out: List[ScheduleEvent] = []
+    for i in range(n):
+        src = events[i % len(events)] if repeat else events[i]
+        out.append(ScheduleEvent(round(i * change_step, 6), src.five_qi))
+    return out
 
 
 def write_schedule_csv(path: Path, events: List[ScheduleEvent], *, dscp: bool) -> None:
@@ -281,6 +296,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="align QoS changes to exact multiples (default 0.5 s); 0 = use CSV times",
     )
     p.add_argument(
+        "--schedule-end",
+        type=float,
+        default=20.0,
+        help="last QoS change time when aligning (default 20 = 40 x 0.5s transitions)",
+    )
+    p.add_argument(
+        "--no-repeat",
+        action="store_true",
+        help="do not repeat sequence when schedule-end needs more points than CSV",
+    )
+    p.add_argument(
         "--emit-schedule",
         metavar="PATH",
         help="also write aligned rel_time_s,five_qi (or dscp) schedule CSV",
@@ -298,7 +324,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     events = load_schedule(schedule_path)
     if args.change_step and args.change_step > 0:
-        events = align_schedule_events(events, args.change_step)
+        events = align_schedule_events(
+            events,
+            args.change_step,
+            schedule_end=args.schedule_end,
+            repeat=not args.no_repeat,
+        )
 
     profiles = load_profiles(args)
 
@@ -307,7 +338,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.end_time is not None:
         end_time = args.end_time
     else:
-        end_time = events[-1].rel_time_s
+        end_time = (
+            21.0
+            if (args.change_step and args.change_step > 0)
+            else events[-1].rel_time_s
+        )
 
     if args.emit_schedule:
         emit_path = Path(args.emit_schedule)
