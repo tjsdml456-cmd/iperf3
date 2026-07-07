@@ -3,6 +3,9 @@
 Expand a piecewise QoS schedule (rel_time_s + five_qi or dscp) into a fixed
 time grid (default 0.01 s) with target rate, GBR, and PDB per row.
 
+Uses CSV event times as-is (default): the same 5QI/DSCP stays until the next
+event — even if that is ~1 s or longer. Rate/PDB follow the active value only.
+
 Default profiles (override with --profile or --profiles-json):
   5QI 66 / DSCP 44  GBR      target 7 Mbps   PDB 100 ms
   5QI 84 / DSCP 15  DC-GBR   target 4 Mbps   PDB  30 ms
@@ -11,9 +14,9 @@ Default profiles (override with --profile or --profiles-json):
 
 Example:
   python3 expand_qos_schedule.py qos_schedule_dscp_replay.csv -o expanded.csv
-  python3 expand_qos_schedule.py qos_schedule_dscp.csv --step 0.01
-  python3 expand_qos_schedule.py schedule.csv \\
-      --profile 66:7:7:100:GBR --profile 84:4:4:30:DC-GBR --profile 80:: :10:pdb-only
+  python3 expand_qos_schedule.py qos_schedule_dscp.csv --duration 21
+  # optional: force 0.5 s grid (not recommended for measured schedules)
+  python3 expand_qos_schedule.py schedule.csv --change-step 0.5 --schedule-end 20
 """
 
 from __future__ import annotations
@@ -292,8 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--change-step",
         type=float,
-        default=0.5,
-        help="align QoS changes to exact multiples (default 0.5 s); 0 = use CSV times",
+        default=0,
+        help="re-time events to 0, step, 2*step, ... (0 = use CSV times, default)",
     )
     p.add_argument(
         "--schedule-end",
@@ -338,11 +341,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.end_time is not None:
         end_time = args.end_time
     else:
-        end_time = (
-            21.0
-            if (args.change_step and args.change_step > 0)
-            else events[-1].rel_time_s
-        )
+        end_time = max(events[-1].rel_time_s, 21.0)
 
     if args.emit_schedule:
         emit_path = Path(args.emit_schedule)
