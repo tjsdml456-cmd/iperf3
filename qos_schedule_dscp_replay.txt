@@ -1,4 +1,6 @@
 # 동일값 최대 1s / 1s 간격 8회·0.5s 92회 / 100회 전환
+# 5QI : 66(GBR: 7Mbps), 80(PRD-only), 84(DC-GBR: 4Mbps)
+# iperf bit rate: GBR: 7.5Mbps, DC-GBR: 5Mbps, PDB-nly: 1.5Mbps
 # rel_time_s,five_qi
 0,84
 1,66
