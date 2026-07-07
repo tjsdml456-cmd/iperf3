@@ -1,4 +1,6 @@
 # t=0~0.5s: DSCP 0 / 동일값 최대 1s / 1s 간격 8회·0.5s 92회 (5QI replay와 동일)
+# dscp : 44(GBR: 7Mbps), 24(PRD-only), 15(DC-GBR: 4Mbps)
+# iperf bit rate: GBR: 7.5Mbps, DC-GBR: 5Mbps, PDB-nly: 1.5Mbps
 # rel_time_s,dscp
 0,0
 0.5,15
