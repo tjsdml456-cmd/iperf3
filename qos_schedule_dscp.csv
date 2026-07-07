@@ -1,4 +1,6 @@
 # DSCP 실측 스케줄 (iperf --dscp-change)
+# dscp : 44(GBR: 7Mbps), 24(PRD-only), 15(DC-GBR: 4Mbps)
+# iperf bit rate: GBR: 8Mbps, DC-GBR: 5Mbps, PDB-nly: 1.5Mbps
 # rel_time_s,dscp
 0,15
 0.999927,44
