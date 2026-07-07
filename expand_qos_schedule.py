@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 Expand a piecewise QoS schedule (rel_time_s + five_qi or dscp) into a fixed
-time grid (default 0.01 s) with target rate, GBR, and PDB per row.
+time grid (default 0.01 s) with scenario rate, GBR, and PDB per row.
 
 Uses CSV event times as-is (default): the same 5QI/DSCP stays until the next
 event — even if that is ~1 s or longer. Rate/PDB follow the active value only.
 
+Default input: qos_schedule_dscp_replay.csv
+
 Default profiles (override with --profile or --profiles-json):
-  5QI 66 / DSCP 44  GBR      target 7 Mbps   PDB 100 ms
-  5QI 84 / DSCP 15  DC-GBR   target 4 Mbps   PDB  30 ms
-  5QI 80 / DSCP 24  pdb-only no target rate  PDB  10 ms
-  5QI  9 / DSCP  0  default  no target rate  PDB   -
+  5QI 66 / DSCP 44  GBR      scenario 7.5 Mbps  GBR 7.5 Mbps  PDB 100 ms
+  5QI 84 / DSCP 15  DC-GBR   scenario 5 Mbps    GBR 5 Mbps    PDB  30 ms
+  5QI 80 / DSCP 24  pdb-only scenario 1.5 Mbps               PDB  10 ms
+  5QI  9 / DSCP  0  default  (no scenario rate)              PDB   -
 
 Example:
   python3 expand_qos_schedule.py qos_schedule_dscp_replay.csv -o expanded.csv
@@ -38,21 +40,21 @@ class QosProfile:
     five_qi: int
     dscp: int
     qos_class: str
-    target_rate_mbps: Optional[float]
+    scenario_rate_mbps: Optional[float]
     gbr_mbps: Optional[float]
     pdb_ms: Optional[float]
 
     @classmethod
     def from_dict(cls, five_qi: int, data: dict) -> "QosProfile":
         dscp = int(data.get("dscp", FIVE_QI_TO_DSCP.get(five_qi, 0)))
-        tr = data.get("target_rate_mbps")
+        sr = data.get("scenario_rate_mbps", data.get("target_rate_mbps"))
         gbr = data.get("gbr_mbps")
         pdb = data.get("pdb_ms")
         return cls(
             five_qi=five_qi,
             dscp=dscp,
             qos_class=str(data.get("qos_class", data.get("class", "?"))),
-            target_rate_mbps=None if tr in (None, "", "-") else float(tr),
+            scenario_rate_mbps=None if sr in (None, "", "-") else float(sr),
             gbr_mbps=None if gbr in (None, "", "-") else float(gbr),
             pdb_ms=None if pdb in (None, "", "-") else float(pdb),
         )
@@ -62,28 +64,28 @@ DEFAULT_PROFILES: Dict[int, dict] = {
     66: {
         "dscp": 44,
         "qos_class": "GBR",
-        "target_rate_mbps": 7.0,
-        "gbr_mbps": 7.0,
+        "scenario_rate_mbps": 7.5,
+        "gbr_mbps": 7.5,
         "pdb_ms": 100.0,
     },
     84: {
         "dscp": 15,
         "qos_class": "DC-GBR",
-        "target_rate_mbps": 4.0,
-        "gbr_mbps": 4.0,
+        "scenario_rate_mbps": 5.0,
+        "gbr_mbps": 5.0,
         "pdb_ms": 30.0,
     },
     80: {
         "dscp": 24,
         "qos_class": "pdb-only",
-        "target_rate_mbps": None,
+        "scenario_rate_mbps": 1.5,
         "gbr_mbps": None,
         "pdb_ms": 10.0,
     },
     9: {
         "dscp": 0,
         "qos_class": "default",
-        "target_rate_mbps": None,
+        "scenario_rate_mbps": None,
         "gbr_mbps": None,
         "pdb_ms": None,
     },
@@ -97,11 +99,11 @@ class ScheduleEvent:
 
 
 def _parse_profile_arg(spec: str) -> Tuple[int, dict]:
-    # five_qi:target_rate:gbr:pdb_ms:qos_class  (empty fields allowed)
+    # five_qi:scenario_rate:gbr:pdb_ms:qos_class  (empty fields allowed)
     parts = spec.split(":")
     if len(parts) < 5:
         raise ValueError(
-            f"invalid --profile {spec!r}; use five_qi:target_mbps:gbr_mbps:pdb_ms:class"
+            f"invalid --profile {spec!r}; use five_qi:scenario_mbps:gbr_mbps:pdb_ms:class"
         )
     five_qi = int(parts[0])
 
@@ -112,7 +114,7 @@ def _parse_profile_arg(spec: str) -> Tuple[int, dict]:
         return float(s)
 
     return five_qi, {
-        "target_rate_mbps": _num(parts[1]),
+        "scenario_rate_mbps": _num(parts[1]),
         "gbr_mbps": _num(parts[2]),
         "pdb_ms": _num(parts[3]),
         "qos_class": parts[4].strip() or "?",
@@ -235,7 +237,7 @@ def write_expanded(
         "five_qi",
         "dscp",
         "qos_class",
-        "target_rate_mbps",
+        "scenario_rate_mbps",
         "gbr_mbps",
         "pdb_ms",
     ]
@@ -254,7 +256,7 @@ def write_expanded(
                 "five_qi": p.five_qi,
                 "dscp": p.dscp,
                 "qos_class": p.qos_class,
-                "target_rate_mbps": fmt_opt(p.target_rate_mbps),
+                "scenario_rate_mbps": fmt_opt(p.scenario_rate_mbps),
                 "gbr_mbps": fmt_opt(p.gbr_mbps),
                 "pdb_ms": fmt_opt(p.pdb_ms),
             }
@@ -289,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         action="append",
         metavar="SPEC",
-        help="five_qi:target_mbps:gbr_mbps:pdb_ms:qos_class (use - for empty)",
+        help="five_qi:scenario_mbps:gbr_mbps:pdb_ms:qos_class (use - for empty)",
     )
     p.add_argument("--profiles-json", help="JSON file { \"66\": { ... }, ... }")
     p.add_argument(
@@ -341,7 +343,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.end_time is not None:
         end_time = args.end_time
     else:
-        end_time = max(events[-1].rel_time_s, 21.0)
+        end_time = events[-1].rel_time_s
 
     if args.emit_schedule:
         emit_path = Path(args.emit_schedule)
